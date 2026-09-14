@@ -234,6 +234,18 @@ type BifrostHTTPServer struct {
 	Client *bifrost.Bifrost
 	Config *lib.Config
 
+	// ConfigStoreDecorator lets an embedding application install a persistence
+	// boundary after config loading but before plugins, background workers, and
+	// HTTP handlers retain the store. Standalone Bifrost leaves this nil.
+	ConfigStoreDecorator func(configstore.ConfigStore) (configstore.ConfigStore, error)
+	// KVStoreFactory lets an embedding application replace the default in-memory
+	// runtime store before plugins, the core client, and HTTP handlers retain it.
+	// Standalone Bifrost leaves this nil.
+	KVStoreFactory func() (lib.RuntimeKVStore, error)
+	// ListModelsFilter lets an embedding application narrow successful model
+	// listings with its own policy. Standalone Bifrost leaves this nil.
+	ListModelsFilter func(*schemas.BifrostContext, *schemas.BifrostListModelsResponse) error
+
 	Server *fasthttp.Server
 	Router *router.Router
 
@@ -1542,12 +1554,32 @@ func (s *BifrostHTTPServer) NarrowListModelsProviders(ctx *schemas.BifrostContex
 	if err != nil || access == nil {
 		return
 	}
-	granted := access.GrantedProvidersForModel("")
-	providers := make([]schemas.ModelProvider, 0, len(granted))
-	for _, provider := range granted {
-		providers = append(providers, schemas.ModelProvider(provider))
+	configured, err := s.Config.GetAllProviders()
+	if err != nil {
+		logger.Warn("failed to narrow model listing providers: %v", err)
+		return
 	}
+	providers := listModelsProvidersAllowedBy(access, configured)
 	ctx.SetValue(schemas.BifrostContextKeyAvailableProviders, providers)
+}
+
+// FilterListModels applies the embedding application's optional response
+// policy after Bifrost's own provider and virtual-key access checks.
+func (s *BifrostHTTPServer) FilterListModels(ctx *schemas.BifrostContext, response *schemas.BifrostListModelsResponse) error {
+	if s == nil || s.ListModelsFilter == nil {
+		return nil
+	}
+	return s.ListModelsFilter(ctx, response)
+}
+
+func listModelsProvidersAllowedBy(access schemas.Access, configured []schemas.ModelProvider) []schemas.ModelProvider {
+	providers := make([]schemas.ModelProvider, 0, len(configured))
+	for _, provider := range configured {
+		if access.IsProviderAllowed(string(provider)) {
+			providers = append(providers, provider)
+		}
+	}
+	return providers
 }
 
 // AdmitMCPGatewayRequest runs a /mcp request through the governance funnel before any tool is listed
@@ -2700,6 +2732,14 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config %v", err)
 	}
+	if err := s.decorateConfigStore(); err != nil {
+		s.Config.Close(ctx)
+		return err
+	}
+	if err := s.installRuntimeKVStore(); err != nil {
+		s.Config.Close(ctx)
+		return err
+	}
 	if s.Config.KVStore != nil {
 		integrations.RegisterKVDecoders(s.Config.KVStore)
 	}
@@ -3074,6 +3114,45 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	// upstream starts serving mid-uptime stays invisible until a restart or a
 	// key edit, since nothing else re-fetches list-models.
 	s.RestartLiveModelRefresher(s.Ctx)
+	return nil
+}
+
+func (s *BifrostHTTPServer) decorateConfigStore() error {
+	if s.ConfigStoreDecorator == nil || s.Config == nil || s.Config.ConfigStore == nil {
+		return nil
+	}
+	decorated, err := s.ConfigStoreDecorator(s.Config.ConfigStore)
+	if err != nil {
+		return fmt.Errorf("failed to decorate config store: %w", err)
+	}
+	if decorated == nil {
+		return errors.New("failed to decorate config store: decorator returned nil")
+	}
+	s.Config.ConfigStore = decorated
+	return nil
+}
+
+func (s *BifrostHTTPServer) installRuntimeKVStore() error {
+	if s.KVStoreFactory == nil {
+		return nil
+	}
+	if s.Config == nil {
+		return errors.New("failed to install runtime KV store: config is nil")
+	}
+	replacement, err := s.KVStoreFactory()
+	if err != nil {
+		return fmt.Errorf("failed to create runtime KV store: %w", err)
+	}
+	if replacement == nil {
+		return errors.New("failed to create runtime KV store: factory returned nil")
+	}
+	if current := s.Config.KVStore; current != nil {
+		if err := current.Close(); err != nil {
+			_ = replacement.Close()
+			return fmt.Errorf("failed to close default runtime KV store: %w", err)
+		}
+	}
+	s.Config.KVStore = replacement
 	return nil
 }
 

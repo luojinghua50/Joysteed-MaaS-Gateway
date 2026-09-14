@@ -259,3 +259,8 @@ ui/app/routeTree.gen.ts
 bifrost-migration-cli
 
 tests/e2e/clis/reports
+
+# Local architecture and design documents.
+MAAS_TECH_DESIGN.md
+MAAS_TABLE_AUDIT.md
+BIFROST_ARCHITECTURE.md

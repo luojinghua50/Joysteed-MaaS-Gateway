@@ -2,12 +2,27 @@ package integrations
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/grant"
 )
+
+type filteringAccessResolver struct {
+	stubAccessResolver
+	filterCalls int
+	err         error
+}
+
+func (s *filteringAccessResolver) FilterListModels(_ *schemas.BifrostContext, response *schemas.BifrostListModelsResponse) error {
+	s.filterCalls++
+	if s.err == nil {
+		response.Data = nil
+	}
+	return s.err
+}
 
 // stubAccessResolver records that it was asked and publishes what a fixed access grants, standing
 // in for the server, which is what answers this in production.
@@ -81,6 +96,27 @@ func TestListModelsWithoutAccessResolver(t *testing.T) {
 
 	if g.accessResolver != nil {
 		t.Fatalf("expected no resolver, got %#v", g.accessResolver)
+	}
+}
+
+func TestListModelsResponseFilterIsOptionalAndFailClosed(t *testing.T) {
+	response := &schemas.BifrostListModelsResponse{Data: []schemas.Model{{ID: "openai/model-a"}}}
+	withoutFilter := NewGenericRouter(nil, &mockHandlerStore{}, &stubAccessResolver{}, nil, nil, nil)
+	if err := withoutFilter.filterListModelsResponse(listModelsCtx(), response); err != nil {
+		t.Fatalf("optional filter returned error: %v", err)
+	}
+	if len(response.Data) != 1 {
+		t.Fatalf("response changed without filter: %#v", response.Data)
+	}
+
+	wantErr := errors.New("policy unavailable")
+	resolver := &filteringAccessResolver{err: wantErr}
+	withFilter := NewGenericRouter(nil, &mockHandlerStore{}, resolver, nil, nil, nil)
+	if err := withFilter.filterListModelsResponse(listModelsCtx(), response); !errors.Is(err, wantErr) {
+		t.Fatalf("filter error = %v, want %v", err, wantErr)
+	}
+	if resolver.filterCalls != 1 {
+		t.Fatalf("filter calls = %d, want 1", resolver.filterCalls)
 	}
 }
 

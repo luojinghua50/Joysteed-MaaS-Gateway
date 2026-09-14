@@ -12,7 +12,6 @@ import (
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/providers/gemini"
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/framework/kvstore"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -533,7 +532,7 @@ func getProviderFromHeader(ctx *fasthttp.RequestCtx, defaultProvider schemas.Mod
 	return schemas.ModelProvider(providerHeader)
 }
 
-func RegisterKVDecoders(store *kvstore.Store) {
+func RegisterKVDecoders(store lib.RuntimeKVStore) {
 	store.RegisterDecoder("genai_upload_session:", func(data []byte) (any, error) {
 		var v gemini.GeminiResumableUploadSession
 		return &v, sonic.Unmarshal(data, &v)

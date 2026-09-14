@@ -418,6 +418,13 @@ type AccessResolver interface {
 	NarrowListModelsProviders(bifrostCtx *schemas.BifrostContext)
 }
 
+// ListModelsResponseFilter is an optional extension implemented by embedding
+// applications that need to apply policy after Bifrost and governance have
+// produced the accessible model list. Standalone Bifrost does not install one.
+type ListModelsResponseFilter interface {
+	FilterListModels(bifrostCtx *schemas.BifrostContext, response *schemas.BifrostListModelsResponse) error
+}
+
 // StreamConfig defines streaming-specific configuration for an integration
 //
 // SSE FORMAT BEHAVIOR:
@@ -606,6 +613,14 @@ func NewGenericRouter(client *bifrost.Bifrost, handlerStore lib.HandlerStore, ac
 		passthroughCfg: passthroughCfg,
 		logger:         logger,
 	}
+}
+
+func (g *GenericRouter) filterListModelsResponse(ctx *schemas.BifrostContext, response *schemas.BifrostListModelsResponse) error {
+	filter, ok := g.accessResolver.(ListModelsResponseFilter)
+	if !ok {
+		return nil
+	}
+	return filter.FilterListModels(ctx, response)
 }
 
 // RegisterRoutes registers all configured routes on the given fasthttp router.
@@ -1010,6 +1025,10 @@ func (g *GenericRouter) handleNonStreamingRequest(ctx *fasthttp.RequestCtx, conf
 
 		if listModelsResponse == nil {
 			g.sendError(ctx, bifrostCtx, config.ErrorConverter, newBifrostError(nil, "Bifrost response is nil after post-request callback"))
+			return
+		}
+		if err := g.filterListModelsResponse(bifrostCtx, listModelsResponse); err != nil {
+			g.sendError(ctx, bifrostCtx, config.ErrorConverter, newBifrostError(err, "failed to apply model access policy"))
 			return
 		}
 		g.markDeprecatedListModelsResponse(listModelsResponse)

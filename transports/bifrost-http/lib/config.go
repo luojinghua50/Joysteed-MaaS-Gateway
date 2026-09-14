@@ -77,9 +77,9 @@ type HandlerStore interface {
 	GetAsyncJobExecutor() *logstore.AsyncJobExecutor
 	// GetAsyncJobResultTTL returns the default TTL for async job results in seconds.
 	GetAsyncJobResultTTL() int
-	// GetKVStore returns the shared in-memory kvstore instance.
+	// GetKVStore returns the shared runtime KV store.
 	// Returns nil if not initialized.
-	GetKVStore() *kvstore.Store
+	GetKVStore() RuntimeKVStore
 	// GetMCPHeaderCombinedAllowlist returns the combined allowlist for MCP headers
 	GetMCPHeaderCombinedAllowlist() schemas.WhiteList
 	// ShouldAllowPerRequestStorageOverride returns whether per-request overrides for content storage are permitted
@@ -92,6 +92,16 @@ type HandlerStore interface {
 	// redirect_uri when acting as an OAuth client to upstream MCP servers, or empty string
 	// if not configured (falls back to dynamic Host-header-based URL).
 	GetMCPExternalClientURL() string
+}
+
+// RuntimeKVStore is the HTTP transport's KV contract. The core only needs the
+// schemas.KVStore subset; transport integrations additionally require atomic
+// consume-once reads and typed decoding for values that cross process bounds.
+type RuntimeKVStore interface {
+	schemas.KVStore
+	GetAndDelete(key string) (any, error)
+	RegisterDecoder(keyPrefix string, decoder kvstore.TypeDecoder)
+	Close() error
 }
 
 // Retry backoff constants for validation
@@ -640,8 +650,8 @@ type Config struct {
 
 	// Async job executor (initialized during setup if LogsStore + governance are available)
 	AsyncJobExecutor *logstore.AsyncJobExecutor
-	// Shared in-memory kvstore for transport-level protocol coordination.
-	KVStore *kvstore.Store
+	// Shared runtime KV store for transport-level protocol coordination.
+	KVStore RuntimeKVStore
 
 	// Process-wide feature flag store. Flags are code-declared via
 	// featureflags.Register; this struct holds the effective state with
@@ -1396,11 +1406,14 @@ func applyToolManagerToClientConfig(cc *configstore.ClientConfig, tm *schemas.MC
 func loadProviders(ctx context.Context, config *Config, configData *ConfigData) error {
 	var providersInConfigStore map[schemas.ModelProvider]configstore.ProviderConfig
 	var err error
+	providersLoadedFromStore := false
 	if config.ConfigStore != nil {
 		logger.Debug("getting providers config from store")
 		providersInConfigStore, err = config.ConfigStore.GetProvidersConfig(ctx)
 		if err != nil {
 			logger.Warn("failed to get providers config from store: %v", err)
+		} else if len(providersInConfigStore) > 0 {
+			providersLoadedFromStore = true
 		}
 	}
 	if providersInConfigStore == nil {
@@ -1434,10 +1447,11 @@ func loadProviders(ctx context.Context, config *Config, configData *ConfigData) 
 	}
 	// Update store and config
 	if config.ConfigStore != nil {
-		logger.Debug("updating providers config in store")
 		if configData.isConfigJSONSourceOfTruth() && providersSectionPresent {
+			logger.Debug("updating providers config in store")
 			err = syncAuthoritativeProvidersInStore(ctx, config.ConfigStore, existingProvidersForPrune, providersInConfigStore)
-		} else {
+		} else if len(configData.Providers) > 0 || !providersLoadedFromStore {
+			logger.Debug("updating providers config in store")
 			err = config.ConfigStore.UpdateProvidersConfig(ctx, providersInConfigStore)
 		}
 		if err != nil {
@@ -5876,8 +5890,8 @@ func (c *Config) GetAsyncJobResultTTL() int {
 	return logstore.DefaultAsyncJobResultTTL
 }
 
-// GetKVStore returns the shared in-memory kvstore instance.
-func (c *Config) GetKVStore() *kvstore.Store {
+// GetKVStore returns the shared runtime KV store.
+func (c *Config) GetKVStore() RuntimeKVStore {
 	return c.KVStore
 }
 

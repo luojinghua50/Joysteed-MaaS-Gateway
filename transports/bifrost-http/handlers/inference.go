@@ -50,6 +50,10 @@ type CompletionHandler struct {
 	config        *lib.Config
 }
 
+type listModelsResponseFilter interface {
+	FilterListModels(bifrostCtx *schemas.BifrostContext, response *schemas.BifrostListModelsResponse) error
+}
+
 // NewInferenceHandler creates a new completion handler instance
 func NewInferenceHandler(modelsManager ModelsManager, client *bifrost.Bifrost, config *lib.Config) *CompletionHandler {
 	return &CompletionHandler{
@@ -925,6 +929,13 @@ func (h *CompletionHandler) listModels(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	if filter, ok := h.modelsManager.(listModelsResponseFilter); ok {
+		if err := filter.FilterListModels(bifrostCtx, resp); err != nil {
+			bifrostCtx.Log(schemas.LogLevelError, fmt.Sprintf("model access policy failed: %v", err))
+			SendError(ctx, fasthttp.StatusServiceUnavailable, "Model access policy is temporarily unavailable")
+			return
+		}
+	}
 	enrichListModelsResponse(resp, h.config.ModelCatalog)
 	if resp != nil {
 		lib.ApplyBifrostResponseHeaders(ctx, bifrostCtx, resp.ExtraFields)

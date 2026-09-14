@@ -10,7 +10,6 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/grant"
-	"github.com/maximhq/bifrost/framework/kvstore"
 	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/stretchr/testify/assert"
@@ -37,7 +36,7 @@ func (s testWSHandlerStore) GetAsyncJobResultTTL() int {
 	return 0
 }
 
-func (s testWSHandlerStore) GetKVStore() *kvstore.Store {
+func (s testWSHandlerStore) GetKVStore() lib.RuntimeKVStore {
 	return nil
 }
 

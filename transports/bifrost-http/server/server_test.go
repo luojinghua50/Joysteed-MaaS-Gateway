@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"slices"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/framework/kvstore"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
@@ -130,6 +132,65 @@ type TestConfig struct {
 type updateStatusOnlyConfigStore struct {
 	configstore.ConfigStore
 	calls []schemas.KeyStatus
+}
+
+func TestDecorateConfigStore(t *testing.T) {
+	original := &updateStatusOnlyConfigStore{}
+	decorated := &updateStatusOnlyConfigStore{}
+	server := &BifrostHTTPServer{
+		Config: &lib.Config{ConfigStore: original},
+		ConfigStoreDecorator: func(got configstore.ConfigStore) (configstore.ConfigStore, error) {
+			if got != original {
+				t.Fatalf("decorator received %T, want original store", got)
+			}
+			return decorated, nil
+		},
+	}
+
+	if err := server.decorateConfigStore(); err != nil {
+		t.Fatalf("decorate config store: %v", err)
+	}
+	if server.Config.ConfigStore != decorated {
+		t.Fatalf("decorated store was not installed")
+	}
+}
+
+func TestInstallRuntimeKVStoreReplacesAndClosesDefault(t *testing.T) {
+	original, err := kvstore.New(kvstore.Config{})
+	if err != nil {
+		t.Fatalf("create original store: %v", err)
+	}
+	replacement, err := kvstore.New(kvstore.Config{})
+	if err != nil {
+		t.Fatalf("create replacement store: %v", err)
+	}
+	t.Cleanup(func() { _ = replacement.Close() })
+
+	server := &BifrostHTTPServer{
+		Config: &lib.Config{KVStore: original},
+		KVStoreFactory: func() (lib.RuntimeKVStore, error) {
+			return replacement, nil
+		},
+	}
+	if err := server.installRuntimeKVStore(); err != nil {
+		t.Fatalf("install runtime KV store: %v", err)
+	}
+	if server.Config.KVStore != replacement {
+		t.Fatal("replacement runtime KV store was not installed")
+	}
+	if _, err := original.Get("closed"); !errors.Is(err, kvstore.ErrClosed) {
+		t.Fatalf("default runtime KV store was not closed: %v", err)
+	}
+}
+
+func TestInstallRuntimeKVStoreRejectsNilFactoryResult(t *testing.T) {
+	server := &BifrostHTTPServer{
+		Config:         &lib.Config{},
+		KVStoreFactory: func() (lib.RuntimeKVStore, error) { return nil, nil },
+	}
+	if err := server.installRuntimeKVStore(); err == nil {
+		t.Fatal("expected nil runtime KV store to be rejected")
+	}
 }
 
 type noopTestLogger struct{}

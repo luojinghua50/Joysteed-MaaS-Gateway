@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
-	"github.com/maximhq/bifrost/framework/kvstore"
 	"github.com/maximhq/bifrost/framework/logstore"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -28,7 +27,7 @@ func (s testHandlerStore) GetProvidersForModel(_ string) []schemas.ModelProvider
 func (s testHandlerStore) GetStreamChunkInterceptor() StreamChunkInterceptor     { return nil }
 func (s testHandlerStore) GetAsyncJobExecutor() *logstore.AsyncJobExecutor       { return nil }
 func (s testHandlerStore) GetAsyncJobResultTTL() int                             { return 0 }
-func (s testHandlerStore) GetKVStore() *kvstore.Store                            { return nil }
+func (s testHandlerStore) GetKVStore() RuntimeKVStore                            { return nil }
 func (s testHandlerStore) GetMCPHeaderCombinedAllowlist() schemas.WhiteList {
 	return schemas.WhiteList{}
 }
