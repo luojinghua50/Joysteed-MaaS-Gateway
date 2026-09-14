@@ -1,0 +1,346 @@
+import { FilterSidebarTrigger } from "@/components/filters/filterSidebarTrigger";
+import { CheckboxFilterItem, FilterSection, SearchableCheckboxList, useAutoFocusOnOpen } from "@/components/filters/primitives";
+import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scrollArea";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { Statuses } from "@/lib/constants/logs";
+import { useGetMCPLogsFilterDataQuery } from "@/lib/store";
+import type { MCPToolLogFilters } from "@/lib/types/logs";
+import { PanelLeftClose, RotateCcw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+const COLLAPSE_STORAGE_KEY = "mcp-filter-sidebar-collapsed";
+
+// ---------------------------------------------------------------------------
+// MCPFilterSidebar – orchestrator
+// ---------------------------------------------------------------------------
+
+interface MCPFilterSidebarProps {
+	filters: MCPToolLogFilters;
+	onFiltersChange: (filters: MCPToolLogFilters) => void;
+}
+
+export function MCPFilterSidebar({ filters, onFiltersChange }: MCPFilterSidebarProps) {
+	const isMobile = useIsMobile();
+	const [collapsed, setCollapsed] = useState(false);
+
+	// Load persisted collapsed state on mount
+	useEffect(() => {
+		if (typeof window === "undefined") return;
+		if (isMobile) {
+			setCollapsed(true);
+			return;
+		}
+		const stored = window.localStorage.getItem(COLLAPSE_STORAGE_KEY);
+		setCollapsed(stored === "true");
+	}, [isMobile]);
+
+	const toggleCollapsed = useCallback(() => {
+		setCollapsed((prev) => {
+			const next = !prev;
+			if (typeof window !== "undefined") {
+				window.localStorage.setItem(COLLAPSE_STORAGE_KEY, String(next));
+			}
+			return next;
+		});
+	}, []);
+
+	const activeFilterCount = useMemo(() => {
+		const excludedKeys = ["start_time", "end_time", "content_search", "period", "polling"];
+		let count = Object.entries(filters).reduce((c, [key, value]) => {
+			if (excludedKeys.includes(key)) return c;
+			if (Array.isArray(value)) return c + value.length;
+			return c + (value ? 1 : 0);
+		}, 0);
+		return count;
+	}, [filters]);
+
+	const handleReset = useCallback(() => {
+		onFiltersChange({
+			start_time: filters.start_time,
+			end_time: filters.end_time,
+		});
+	}, [filters.start_time, filters.end_time, onFiltersChange]);
+
+	// Collapsed: thin rail with vertical "Filters" label — whole rail is clickable to expand
+	if (collapsed) {
+		return <FilterSidebarTrigger activeFilterCount={activeFilterCount} onClick={toggleCollapsed} />;
+	}
+
+	return (
+		<div className="bg-card fixed inset-y-2 left-2 z-40 flex h-auto w-[calc(100vw-1rem)] max-w-72 shrink-0 flex-col rounded-md border shadow-xl md:static md:h-full md:w-64 md:max-w-none md:rounded-md md:shadow-none">
+			{/* Header */}
+			<div className="flex h-11 items-center justify-between border-b pr-2 pl-5">
+				<span className="text-sm font-semibold">Filters</span>
+				<div className="flex items-center gap-1">
+					{activeFilterCount > 0 && (
+						<Button variant="outline" size="sm" className="text-muted-foreground h-7 px-2 text-xs" onClick={handleReset}>
+							<RotateCcw className="size-3" />
+							Reset
+						</Button>
+					)}
+					<Button variant="ghost" size="icon" className="size-7" onClick={toggleCollapsed} title="Hide filters" aria-label="Hide filters">
+						<PanelLeftClose className="size-4" />
+					</Button>
+				</div>
+			</div>
+
+			{/* Scrollable filter sections */}
+			<ScrollArea className="flex flex-1 overflow-y-auto p-2 pb-0" viewportClassName="no-table">
+				<div className="flex grow flex-col gap-1">
+					{/* First 2 open by default */}
+					<StatusFilter filters={filters} onFiltersChange={onFiltersChange} defaultOpen />
+					<ToolNamesFilter filters={filters} onFiltersChange={onFiltersChange} />
+					{/* Rest closed unless they have active filters */}
+					<ServersFilter filters={filters} onFiltersChange={onFiltersChange} />
+					<AppFilter filters={filters} onFiltersChange={onFiltersChange} />
+					<VirtualKeysFilter filters={filters} onFiltersChange={onFiltersChange} />
+					{(
+						[
+							["user_ids", "Users"],
+							["team_ids", "Teams"],
+							["customer_ids", "Customers"],
+							["business_unit_ids", "Business units"],
+							["project_ids", "Projects"],
+							["device_ids", "Devices"],
+						] as const
+					).map(([key, label]) =>
+						filters[key]?.length ? (
+							<FilterSection key={key} title={label} defaultOpen>
+								<Button
+									variant="ghost"
+									size="sm"
+									className="w-full justify-between"
+									data-testid={`mcp-clear-${key}`}
+									onClick={() => onFiltersChange({ ...filters, [key]: [] })}
+								>
+									<span>{filters[key]!.length} selected</span>
+									<RotateCcw className="size-3" />
+								</Button>
+							</FilterSection>
+						) : null,
+					)}
+				</div>
+			</ScrollArea>
+		</div>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers & primitives
+// ---------------------------------------------------------------------------
+
+interface FilterComponentProps {
+	filters: MCPToolLogFilters;
+	onFiltersChange: (filters: MCPToolLogFilters) => void;
+	defaultOpen?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// StatusFilter
+// ---------------------------------------------------------------------------
+
+function StatusFilter({ filters, onFiltersChange, defaultOpen }: FilterComponentProps) {
+	const hasActive = (filters.status || []).length > 0;
+
+	return (
+		<FilterSection title="Status" defaultOpen={defaultOpen || hasActive}>
+			{[...Statuses, "unknown"].map((status) => (
+				<CheckboxFilterItem
+					key={status}
+					labelClassName="capitalize"
+					label={status}
+					checked={(filters.status || []).includes(status)}
+					onCheckedChange={() => {
+						const current = filters.status || [];
+						const next = current.includes(status) ? current.filter((s) => s !== status) : [...current, status];
+						onFiltersChange({ ...filters, status: next });
+					}}
+				/>
+			))}
+		</FilterSection>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// ToolNamesFilter – fetches tool names; skips while closed & inactive
+// ---------------------------------------------------------------------------
+
+function ToolNamesFilter({ filters, onFiltersChange, defaultOpen }: FilterComponentProps) {
+	const hasActive = (filters.tool_names || []).length > 0;
+	const [opened, setOpened] = useState(defaultOpen || hasActive);
+	const searchInputRef = useAutoFocusOnOpen(opened);
+	const [searchQuery, setSearchQuery] = useState("");
+	const {
+		data: filterData,
+		isUninitialized,
+		isLoading,
+		isFetching,
+	} = useGetMCPLogsFilterDataQuery({ dimensions: ["tool_names"], q: searchQuery || undefined }, { skip: !opened && !hasActive });
+	const availableToolNames = filterData?.tool_names || [];
+	const items = useMemo(() => {
+		const seen = new Set(availableToolNames);
+		const extras = (filters.tool_names || []).filter((n) => !seen.has(n));
+		return [...availableToolNames, ...extras].map((n) => ({ key: n, label: n }));
+	}, [availableToolNames, filters.tool_names]);
+
+	if (!isUninitialized && !isLoading && availableToolNames.length === 0 && !hasActive && !opened) return null;
+
+	return (
+		<FilterSection title="Tool Names" defaultOpen={defaultOpen || hasActive} loading={isLoading} onOpenChange={setOpened}>
+			<SearchableCheckboxList
+				inputRef={searchInputRef}
+				placeholder="Search or add a tool"
+				items={items}
+				allowCustom
+				isSelected={(name) => (filters.tool_names || []).includes(name)}
+				onToggle={(name) => {
+					const current = filters.tool_names || [];
+					const next = current.includes(name) ? current.filter((n) => n !== name) : [...current, name];
+					onFiltersChange({ ...filters, tool_names: next });
+				}}
+				onSearch={setSearchQuery}
+				fetching={isFetching}
+			/>
+		</FilterSection>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// ServersFilter – fetches server labels; skips while closed & inactive
+// ---------------------------------------------------------------------------
+
+function ServersFilter({ filters, onFiltersChange, defaultOpen }: FilterComponentProps) {
+	const hasActive = (filters.server_labels || []).length > 0;
+	const [opened, setOpened] = useState(defaultOpen || hasActive);
+	const searchInputRef = useAutoFocusOnOpen(opened);
+	const [searchQuery, setSearchQuery] = useState("");
+	const {
+		data: filterData,
+		isUninitialized,
+		isLoading,
+		isFetching,
+	} = useGetMCPLogsFilterDataQuery({ dimensions: ["server_labels"], q: searchQuery || undefined }, { skip: !opened && !hasActive });
+	const availableServerLabels = filterData?.server_labels || [];
+	const items = useMemo(() => {
+		const seen = new Set(availableServerLabels);
+		const extras = (filters.server_labels || []).filter((l) => !seen.has(l));
+		return [...availableServerLabels, ...extras].map((l) => ({ key: l, label: l }));
+	}, [availableServerLabels, filters.server_labels]);
+
+	if (!isUninitialized && !isLoading && availableServerLabels.length === 0 && !hasActive && !opened) return null;
+
+	return (
+		<FilterSection title="Servers" defaultOpen={defaultOpen || hasActive} loading={isLoading} onOpenChange={setOpened}>
+			<SearchableCheckboxList
+				inputRef={searchInputRef}
+				placeholder="Search or add a server"
+				items={items}
+				allowCustom
+				isSelected={(label) => (filters.server_labels || []).includes(label)}
+				onToggle={(label) => {
+					const current = filters.server_labels || [];
+					const next = current.includes(label) ? current.filter((l) => l !== label) : [...current, label];
+					onFiltersChange({ ...filters, server_labels: next });
+				}}
+				onSearch={setSearchQuery}
+				fetching={isFetching}
+			/>
+		</FilterSection>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// AppFilter
+// ---------------------------------------------------------------------------
+
+function AppFilter({ filters, onFiltersChange, defaultOpen }: FilterComponentProps) {
+	const hasActive = (filters.apps || []).length > 0;
+	const [opened, setOpened] = useState(defaultOpen || hasActive);
+	const searchInputRef = useAutoFocusOnOpen(opened);
+	const {
+		data: filterData,
+		isUninitialized,
+		isLoading,
+	} = useGetMCPLogsFilterDataQuery({ dimensions: ["apps"] }, { skip: !opened && !hasActive });
+	const availableApps = useMemo(() => (filterData?.apps as string[] | undefined) || [], [filterData]);
+	const items = useMemo(
+		() => [...new Set([...availableApps, ...(filters.apps || [])])].sort().map((name) => ({ key: name, label: name })),
+		[availableApps, filters.apps],
+	);
+
+	if (!isUninitialized && !isLoading && availableApps.length === 0 && !hasActive && !opened) return null;
+
+	const selectedSet = new Set(filters.apps || []);
+
+	return (
+		<FilterSection
+			title="App"
+			defaultOpen={defaultOpen || hasActive}
+			loading={isLoading}
+			onOpenChange={setOpened}
+			testId="mcp-app-filter-toggle"
+		>
+			<SearchableCheckboxList
+				inputRef={searchInputRef}
+				placeholder="Search apps"
+				items={items}
+				isSelected={(appName) => selectedSet.has(appName)}
+				onToggle={(appName) => {
+					const current = filters.apps || [];
+					const next = current.includes(appName) ? current.filter((app) => app !== appName) : [...current, appName];
+					onFiltersChange({ ...filters, apps: next.length > 0 ? next : undefined });
+				}}
+				testIdPrefix="mcp-app-filter"
+				normalizeTestIdKey
+			/>
+		</FilterSection>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// VirtualKeysFilter – fetches virtual keys; maps name→ID
+// ---------------------------------------------------------------------------
+
+function VirtualKeysFilter({ filters, onFiltersChange, defaultOpen }: FilterComponentProps) {
+	const hasActive = (filters.virtual_key_ids || []).length > 0;
+	const [opened, setOpened] = useState(defaultOpen || hasActive);
+	const searchInputRef = useAutoFocusOnOpen(opened);
+	const [searchQuery, setSearchQuery] = useState("");
+	const {
+		data: filterData,
+		isUninitialized,
+		isLoading,
+		isFetching,
+	} = useGetMCPLogsFilterDataQuery({ dimensions: ["virtual_keys"], q: searchQuery || undefined }, { skip: !opened && !hasActive });
+	const availableVirtualKeys = filterData?.virtual_keys || [];
+	const nameToId = useMemo(() => new Map(availableVirtualKeys.map((key) => [key.name, key.id])), [availableVirtualKeys]);
+
+	if (!isUninitialized && !isLoading && availableVirtualKeys.length === 0 && !hasActive && !opened) return null;
+
+	const isSelected = (name: string) => {
+		const id = nameToId.get(name) || name;
+		return (filters.virtual_key_ids || []).includes(id);
+	};
+
+	const toggle = (name: string) => {
+		const id = nameToId.get(name) || name;
+		const current = filters.virtual_key_ids || [];
+		const next = current.includes(id) ? current.filter((v) => v !== id) : [...current, id];
+		onFiltersChange({ ...filters, virtual_key_ids: next });
+	};
+
+	return (
+		<FilterSection title="Virtual Keys" defaultOpen={defaultOpen || hasActive} loading={isLoading} onOpenChange={setOpened}>
+			<SearchableCheckboxList
+				inputRef={searchInputRef}
+				placeholder="Search virtual keys"
+				items={availableVirtualKeys.map((key) => ({ key: key.name, label: key.name }))}
+				isSelected={isSelected}
+				onToggle={toggle}
+				onSearch={setSearchQuery}
+				fetching={isFetching}
+			/>
+		</FilterSection>
+	);
+}

@@ -1,0 +1,324 @@
+package vertex
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/bytedance/sonic"
+	"github.com/maximhq/bifrost/core/schemas"
+)
+
+func buildVertexRankingConfig(projectID, rankingConfigOverride string) (string, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "", fmt.Errorf("project ID is required for ranking config")
+	}
+
+	override := strings.TrimSpace(rankingConfigOverride)
+	if override == "" {
+		return fmt.Sprintf("projects/%s/locations/global/rankingConfigs/%s", projectID, vertexDefaultRankingConfigID), nil
+	}
+
+	override = strings.TrimSuffix(override, ":rank")
+	if strings.HasPrefix(override, "projects/") {
+		return override, nil
+	}
+	if strings.Contains(override, "/") {
+		return "", fmt.Errorf("invalid ranking_config %q: must be resource name or config ID", rankingConfigOverride)
+	}
+	return fmt.Sprintf("projects/%s/locations/global/rankingConfigs/%s", projectID, override), nil
+}
+
+func getVertexRerankOptions(projectID string, params *schemas.RerankParameters) (*vertexRerankOptions, error) {
+	// Record details are Vertex's name for returning the document back, so it maps onto the
+	// neutral ReturnDocuments flag rather than a provider-specific extra param.
+	options := &vertexRerankOptions{
+		IgnoreRecordDetailsInResponse: params == nil || params.ReturnDocuments == nil || !*params.ReturnDocuments,
+	}
+
+	if params == nil || params.ExtraParams == nil {
+		rankingConfig, err := buildVertexRankingConfig(projectID, "")
+		if err != nil {
+			return nil, err
+		}
+		options.RankingConfig = rankingConfig
+		return options, nil
+	}
+
+	extraParams := params.ExtraParams
+
+	rankingConfigOverride := ""
+	if rawRankingConfig, exists := extraParams["ranking_config"]; exists {
+		rankingConfig, ok := schemas.SafeExtractString(rawRankingConfig)
+		if !ok {
+			return nil, fmt.Errorf("invalid ranking_config: expected string")
+		}
+		rankingConfigOverride = rankingConfig
+	}
+
+	rankingConfig, err := buildVertexRankingConfig(projectID, rankingConfigOverride)
+	if err != nil {
+		return nil, err
+	}
+	options.RankingConfig = rankingConfig
+
+	if rawUserLabels, exists := extraParams["user_labels"]; exists {
+		userLabels, ok := schemas.SafeExtractStringMap(rawUserLabels)
+		if !ok {
+			return nil, fmt.Errorf("invalid user_labels: expected map[string]string")
+		}
+		options.UserLabels = userLabels
+	}
+
+	return options, nil
+}
+
+// ToVertexRankRequest converts a Bifrost rerank request to Discovery Engine rank API format.
+func ToVertexRankRequest(bifrostReq *schemas.BifrostRerankRequest, options *vertexRerankOptions) (*VertexRankRequest, error) {
+	if bifrostReq == nil {
+		return nil, fmt.Errorf("bifrost rerank request is nil")
+	}
+	if options == nil {
+		return nil, fmt.Errorf("vertex rerank options are nil")
+	}
+	if len(bifrostReq.Documents) == 0 {
+		return nil, fmt.Errorf("documents are required for rerank request")
+	}
+	if len(bifrostReq.Documents) > vertexMaxRerankRecordsPerQuery {
+		return nil, fmt.Errorf("vertex rerank supports up to %d records per request", vertexMaxRerankRecordsPerQuery)
+	}
+
+	rankRequest := &VertexRankRequest{
+		Query:   bifrostReq.Query,
+		Records: make([]VertexRankRecord, len(bifrostReq.Documents)),
+	}
+
+	for i, doc := range bifrostReq.Documents {
+		recordID := fmt.Sprintf("%s%d", vertexSyntheticRecordPrefix, i)
+		content := doc.Text
+		if content == "" && len(doc.Data) > 0 {
+			if encoded, err := sonic.Marshal(doc.Data); err == nil {
+				content = string(encoded)
+			}
+		}
+		record := VertexRankRecord{
+			ID:      recordID,
+			Content: &content,
+		}
+
+		if doc.Meta != nil {
+			if rawTitle, exists := doc.Meta["title"]; exists {
+				if title, ok := schemas.SafeExtractString(rawTitle); ok && strings.TrimSpace(title) != "" {
+					record.Title = &title
+				}
+			}
+		}
+
+		rankRequest.Records[i] = record
+	}
+
+	if bifrostReq.Params != nil && bifrostReq.Params.TopN != nil {
+		topN := *bifrostReq.Params.TopN
+		if topN < 1 {
+			return nil, fmt.Errorf("top_n must be at least 1")
+		}
+		if topN > len(bifrostReq.Documents) {
+			topN = len(bifrostReq.Documents)
+		}
+		rankRequest.TopN = &topN
+	}
+
+	trimmedModel := strings.TrimSpace(bifrostReq.Model)
+	if trimmedModel == "" {
+		trimmedModel = vertexDefaultRerankModel
+	}
+	rankRequest.Model = &trimmedModel
+
+	ignoreRecordDetailsInResponse := options.IgnoreRecordDetailsInResponse
+	rankRequest.IgnoreRecordDetailsInResponse = &ignoreRecordDetailsInResponse
+
+	if len(options.UserLabels) > 0 {
+		rankRequest.UserLabels = options.UserLabels
+	}
+
+	return rankRequest, nil
+}
+
+// ToBifrostRerankRequest converts a Discovery Engine rank request to Bifrost format.
+func (req *VertexRankRequest) ToBifrostRerankRequest(ctx *schemas.BifrostContext) *schemas.BifrostRerankRequest {
+	if req == nil {
+		return nil
+	}
+
+	// Leave the provider empty like the other rerank converters so the route's header and the
+	// modelcatalogresolver decide it; pinning Vertex here made /genai/v1/rank single-provider.
+	var provider schemas.ModelProvider
+	var model string
+	if req.Model != nil {
+		provider, model = schemas.ParseModelString(*req.Model, "")
+	}
+
+	bifrostReq := &schemas.BifrostRerankRequest{
+		Provider: provider,
+		Model:    model,
+		Query:    req.Query,
+		Params:   &schemas.RerankParameters{},
+	}
+
+	// Convert records to documents
+	for _, record := range req.Records {
+		doc := schemas.RerankDocument{
+			ID: &record.ID,
+		}
+		if record.Content != nil {
+			doc.Text = *record.Content
+		}
+		if record.Title != nil {
+			doc.Meta = map[string]interface{}{
+				"title": *record.Title,
+			}
+		}
+		bifrostReq.Documents = append(bifrostReq.Documents, doc)
+	}
+
+	// Extract TopN
+	if req.TopN != nil {
+		bifrostReq.Params.TopN = req.TopN
+	}
+
+	// Discovery Engine defaults to returning record details, so an omitted flag means documents come back.
+	bifrostReq.Params.ReturnDocuments = new(req.IgnoreRecordDetailsInResponse == nil || !*req.IgnoreRecordDetailsInResponse)
+
+	if len(req.UserLabels) > 0 {
+		bifrostReq.Params.ExtraParams = map[string]interface{}{"user_labels": req.UserLabels}
+	}
+
+	return bifrostReq
+}
+
+func parseVertexSyntheticRecordIndex(recordID string, maxDocs int) (int, error) {
+	if !strings.HasPrefix(recordID, vertexSyntheticRecordPrefix) {
+		return 0, fmt.Errorf("invalid record id %q: expected prefix %q", recordID, vertexSyntheticRecordPrefix)
+	}
+	indexStr := strings.TrimPrefix(recordID, vertexSyntheticRecordPrefix)
+	index, err := strconv.Atoi(indexStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid record id %q: %w", recordID, err)
+	}
+	if index < 0 || index >= maxDocs {
+		return 0, fmt.Errorf("record id %q maps to out-of-range index %d", recordID, index)
+	}
+	return index, nil
+}
+
+// ToBifrostRerankResponse converts a Discovery Engine rank response to Bifrost format.
+func (response *VertexRankResponse) ToBifrostRerankResponse(documents []schemas.RerankDocument, returnDocuments bool) (*schemas.BifrostRerankResponse, error) {
+	if response == nil {
+		return nil, fmt.Errorf("vertex rerank response is nil")
+	}
+
+	results := make([]schemas.RerankResult, 0, len(response.Records))
+	seenIndices := make(map[int]struct{}, len(response.Records))
+
+	for _, record := range response.Records {
+		index, err := parseVertexSyntheticRecordIndex(record.ID, len(documents))
+		if err != nil {
+			return nil, err
+		}
+
+		if _, seen := seenIndices[index]; seen {
+			return nil, fmt.Errorf("duplicate record id mapping for index %d", index)
+		}
+		seenIndices[index] = struct{}{}
+
+		result := schemas.RerankResult{
+			Index:          index,
+			RelevanceScore: record.Score,
+			ID:             documents[index].ID,
+		}
+
+		if returnDocuments {
+			doc := documents[index]
+			result.Document = &doc
+		}
+
+		results = append(results, result)
+	}
+
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].RelevanceScore == results[j].RelevanceScore {
+			return results[i].Index < results[j].Index
+		}
+		return results[i].RelevanceScore > results[j].RelevanceScore
+	})
+
+	return &schemas.BifrostRerankResponse{
+		Results: results,
+	}, nil
+}
+
+// ToVertexRankResponse converts a Bifrost rerank response to Discovery Engine rank format.
+// Records are keyed by the caller's record ID, which rides on the result as identity; title and
+// content appear only when the caller asked for documents back.
+func ToVertexRankResponse(bifrostResp *schemas.BifrostRerankResponse) (*VertexRankResponse, error) {
+	if bifrostResp == nil {
+		return nil, fmt.Errorf("bifrost rerank response is nil")
+	}
+
+	rankResponse := &VertexRankResponse{
+		Records: make([]VertexRankedRecord, 0, len(bifrostResp.Results)),
+	}
+
+	for _, result := range bifrostResp.Results {
+		record := VertexRankedRecord{
+			Score: result.RelevanceScore,
+		}
+		switch {
+		case result.ID != nil:
+			record.ID = *result.ID
+		case result.Document != nil && result.Document.ID != nil:
+			record.ID = *result.Document.ID
+		}
+
+		if result.Document != nil {
+			if result.Document.Text != "" {
+				record.Content = &result.Document.Text
+			}
+			if rawTitle, exists := result.Document.Meta["title"]; exists {
+				if title, ok := schemas.SafeExtractString(rawTitle); ok && strings.TrimSpace(title) != "" {
+					record.Title = &title
+				}
+			}
+		}
+
+		rankResponse.Records = append(rankResponse.Records, record)
+	}
+
+	return rankResponse, nil
+}
+
+func parseDiscoveryEngineErrorMessage(responseBody []byte) string {
+	if len(responseBody) == 0 {
+		return ""
+	}
+
+	var errorResponse map[string]interface{}
+	if err := sonic.Unmarshal(responseBody, &errorResponse); err == nil {
+		if rawError, exists := errorResponse["error"]; exists {
+			if errorMap, ok := rawError.(map[string]interface{}); ok {
+				if message, ok := schemas.SafeExtractString(errorMap["message"]); ok && strings.TrimSpace(message) != "" {
+					return message
+				}
+			}
+		}
+	}
+
+	rawString := strings.TrimSpace(string(responseBody))
+	if rawString == "" {
+		return ""
+	}
+
+	return rawString
+}

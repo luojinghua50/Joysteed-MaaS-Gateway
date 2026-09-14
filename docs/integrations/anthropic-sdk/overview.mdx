@@ -1,0 +1,348 @@
+---
+title: "Overview"
+description: "Use Bifrost as a drop-in replacement for Anthropic API with full compatibility and enhanced features."
+icon: "book"
+---
+
+## Overview
+
+Bifrost provides complete Anthropic API compatibility through protocol adaptation. The integration handles request transformation, response normalization, and error mapping between Anthropic's Messages API specification and Bifrost's internal processing pipeline.
+
+This integration enables you to utilize Bifrost's features like governance, load balancing, semantic caching, multi-provider support, and more, all while preserving your existing Anthropic SDK-based architecture.
+
+**Endpoint:** `/anthropic`
+
+<Note>
+**Enabling the beta header**: Anthropic frequently uses the `anthropic-beta` header to gate access to new features. 
+Clients like Vercels AI SDK use these. Bifrost will block unrecognized headers by default for security purposes.
+To enable the beta header for full compatability, add `anthropic-beta` to the AllowList under Settings -> Client Settings in the UI.
+</Note>
+
+---
+
+## Setup
+
+<Tabs group="anthropic-sdk">
+<Tab title="Python">
+
+```python {5}
+import anthropic
+
+# Configure client to use Bifrost
+client = anthropic.Anthropic(
+    base_url="http://localhost:8080/anthropic",
+    api_key="<YOUR-BIFROST-VIRTUAL-KEY>"  # Replace with your actual Bifrost virtual key.
+)
+
+# Make requests as usual
+response = client.messages.create(
+    model="claude-3-sonnet-20240229",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+
+print(response.content[0].text)
+```
+
+</Tab>
+<Tab title="JavaScript">
+
+```javascript {5}
+import Anthropic from "@anthropic-ai/sdk";
+
+// Configure client to use Bifrost
+const anthropic = new Anthropic({
+  baseURL: "http://localhost:8080/anthropic",
+  apiKey: "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+});
+
+// Make requests as usual
+const response = await anthropic.messages.create({
+  model: "claude-3-sonnet-20240229",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello!" }],
+});
+
+console.log(response.content[0].text);
+```
+
+</Tab>
+</Tabs>
+
+---
+
+## Provider/Model Usage Examples
+
+Use multiple providers through the same Anthropic SDK format by prefixing model names with the provider:
+
+<Tabs group="anthropic-sdk">
+<Tab title="Python">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(
+    base_url="http://localhost:8080/anthropic",
+    api_key="<YOUR-BIFROST-VIRTUAL-KEY>"  # Replace with your actual Bifrost virtual key.
+)
+
+# Anthropic models (default)
+anthropic_response = client.messages.create(
+    model="claude-3-sonnet-20240229",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello from Claude!"}]
+)
+
+# OpenAI models via Anthropic SDK format
+openai_response = client.messages.create(
+    model="openai/gpt-4o-mini",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello from OpenAI!"}]
+)
+
+# Google Vertex models via Anthropic SDK format
+vertex_response = client.messages.create(
+    model="vertex/gemini-pro",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello from Gemini!"}]
+)
+
+# Azure models
+azure_response = client.messages.create(
+    model="azure/gpt-4o",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello from Azure!"}]
+)
+
+# Local Ollama models
+ollama_response = client.messages.create(
+    model="ollama/llama3.1:8b",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello from Ollama!"}]
+)
+```
+
+</Tab>
+<Tab title="JavaScript">
+
+```javascript
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic({
+  baseURL: "http://localhost:8080/anthropic",
+  apiKey: "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+});
+
+// Anthropic models (default)
+const anthropicResponse = await anthropic.messages.create({
+  model: "claude-3-sonnet-20240229",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello from Claude!" }],
+});
+
+// OpenAI models via Anthropic SDK format
+const openaiResponse = await anthropic.messages.create({
+  model: "openai/gpt-4o-mini",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello from OpenAI!" }],
+});
+
+// Google Vertex models via Anthropic SDK format
+const vertexResponse = await anthropic.messages.create({
+  model: "vertex/gemini-pro",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello from Gemini!" }],
+});
+
+// Azure models
+const azureResponse = await anthropic.messages.create({
+  model: "azure/gpt-4o",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello from Azure!" }],
+});
+
+// Local Ollama models
+const ollamaResponse = await anthropic.messages.create({
+  model: "ollama/llama3.1:8b",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello from Ollama!" }],
+});
+```
+
+</Tab>
+</Tabs>
+
+---
+
+## Adding Custom Headers
+
+Pass custom headers required by Bifrost plugins (like governance, telemetry, etc.):
+
+<Tabs group="anthropic-sdk">
+<Tab title="Python">
+
+```python
+import anthropic
+
+# Sending the virtual key through both fields requires dual_credential_conflict_behavior to be set to "prefer_vk".
+client = anthropic.Anthropic(
+    base_url="http://localhost:8080/anthropic",
+    api_key="<YOUR-BIFROST-VIRTUAL-KEY>",  # Replace with your actual Bifrost virtual key.
+    default_headers={
+        "x-bf-vk": "<YOUR-BIFROST-VIRTUAL-KEY>",  # Replace with your actual Bifrost virtual key.
+    }
+)
+
+response = client.messages.create(
+    model="claude-3-sonnet-20240229",
+    max_tokens=1000,
+    messages=[{"role": "user", "content": "Hello with custom headers!"}]
+)
+```
+
+</Tab>
+<Tab title="JavaScript">
+
+```javascript
+import Anthropic from "@anthropic-ai/sdk";
+
+// Sending the virtual key through both fields requires dual_credential_conflict_behavior to be set to "prefer_vk".
+const anthropic = new Anthropic({
+  baseURL: "http://localhost:8080/anthropic",
+  apiKey: "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+  defaultHeaders: {
+    "x-bf-vk": "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+  },
+});
+
+const response = await anthropic.messages.create({
+  model: "claude-3-sonnet-20240229",
+  max_tokens: 1000,
+  messages: [{ role: "user", content: "Hello with custom headers!" }],
+});
+```
+
+</Tab>
+</Tabs>
+
+---
+
+## Async Inference
+
+Submit inference requests asynchronously and poll for results later using the `x-bf-async` header. This is useful for long-running requests where you don't want to hold a connection open. See [Async Inference](../../features/async-inference) for full details.
+
+<Note>
+Async inference requires a [Logs Store](../../features/observability/default) to be configured and is not compatible with streaming.
+</Note>
+
+### Messages
+
+<Tabs group="anthropic-sdk">
+<Tab title="Python">
+
+```python
+import anthropic
+import time
+
+client = anthropic.Anthropic(
+    base_url="http://localhost:8080/anthropic",
+    api_key="<YOUR-BIFROST-VIRTUAL-KEY>"  # Replace with your actual Bifrost virtual key.
+)
+
+# Submit async request
+initial = client.messages.create(
+    model="anthropic/claude-sonnet-4-20250514",
+    max_tokens=256,
+    messages=[{"role": "user", "content": "Tell me a short story."}],
+    extra_headers={"x-bf-async": "true"}
+)
+
+# If content is present, the request completed synchronously
+if initial.content:
+    print(initial.content[0].text)
+else:
+    # Poll until completed
+    while True:
+        time.sleep(2)
+        poll = client.messages.create(
+            model="anthropic/claude-sonnet-4-20250514",
+            max_tokens=256,
+            messages=[{"role": "user", "content": "Tell me a short story."}],
+            extra_headers={"x-bf-async-id": initial.id}
+        )
+        if poll.content:
+            print(poll.content[0].text)
+            break
+```
+
+</Tab>
+<Tab title="JavaScript">
+
+```javascript
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic({
+  baseURL: "http://localhost:8080/anthropic",
+  apiKey: "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+});
+
+// Submit async request
+const initial = await anthropic.messages.create(
+  {
+    model: "anthropic/claude-sonnet-4-20250514",
+    max_tokens: 256,
+    messages: [{ role: "user", content: "Tell me a short story." }],
+  },
+  { headers: { "x-bf-async": "true" } }
+);
+
+// If content is present, the request completed synchronously
+if (initial.content?.length > 0) {
+  console.log(initial.content[0].text);
+} else {
+  // Poll until completed
+  while (true) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const poll = await anthropic.messages.create(
+      {
+        model: "anthropic/claude-sonnet-4-20250514",
+        max_tokens: 256,
+        messages: [{ role: "user", content: "Tell me a short story." }],
+      },
+      { headers: { "x-bf-async-id": initial.id } }
+    );
+    if (poll.content?.length > 0) {
+      console.log(poll.content[0].text);
+      break;
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+### Async Headers
+
+| Header | Description |
+|---|---|
+| `x-bf-async: true` | Submit the request as an async job. Returns immediately with a job ID. |
+| `x-bf-async-id: <job-id>` | Poll for results of a previously submitted async job. |
+| `x-bf-async-job-result-ttl: <seconds>` | Override the default result TTL (default: 3600s). |
+
+---
+
+## Supported Features
+
+The Anthropic integration supports all features that are available in both the Anthropic SDK and Bifrost core functionality. If the Anthropic SDK supports a feature and Bifrost supports it, the integration will work seamlessly.
+
+---
+
+## Next Steps
+
+- **[Files and Batch API](./files-and-batch)** - File uploads and batch processing
+- **[OpenAI SDK](../openai-sdk/overview)** - GPT integration patterns
+- **[Google GenAI SDK](../genai-sdk)** - Gemini integration patterns  
+- **[Configuration](../../quickstart/README)** - Bifrost setup and configuration
+- **[Core Features](../../features/)** - Advanced Bifrost capabilities
+

@@ -1,0 +1,220 @@
+# OAuth API schemas
+
+MCPAuthType:
+  type: string
+  enum: [none, headers, oauth, per_user_oauth, per_user_headers, token_exchange]
+  description: |
+    Authentication type for MCP connections:
+    - none: No authentication
+    - headers: Static header-based authentication (admin sets API keys / custom headers once, shared by all callers)
+    - oauth: OAuth 2.0 authentication (server-level, admin authenticates once)
+    - per_user_oauth: Per-user OAuth 2.0 authentication (each user authenticates individually)
+    - per_user_headers: Per-user headers (each user submits their own header values; admin declares the schema)
+    - token_exchange: Delegated token exchange (each caller's own identity-provider token is
+      exchanged for a short-lived token scoped to this server on every call; nothing is
+      stored per caller). Requires an enabled identity-provider integration (enterprise).
+
+OAuthConfigRequest:
+  type: object
+  description: |
+    OAuth configuration for an MCP client. Used both when creating a client
+    (initiates the OAuth flow) and when updating one (rotates the stored
+    OAuth config in place; see MCPClientUpdateRequest.oauth_config).
+  properties:
+    client_id:
+      allOf:
+        - $ref: '../../schemas/management/common.yaml#/EnvVar'
+      description: |
+        OAuth client ID. Optional if client supports dynamic client registration (RFC 7591).
+        If not provided, the server_url must be set for OAuth discovery and dynamic registration.
+        Supports env./vault. references.
+    client_secret:
+      allOf:
+        - $ref: '../../schemas/management/common.yaml#/EnvVar'
+      description: |
+        OAuth client secret. Optional for public clients using PKCE or clients obtained via dynamic registration.
+        Supports env./vault. references.
+    authorize_url:
+      type: string
+      description: |
+        OAuth authorization endpoint URL. Optional - will be discovered from server_url if not provided.
+    token_url:
+      type: string
+      description: |
+        OAuth token endpoint URL. Optional - will be discovered from server_url if not provided.
+    registration_url:
+      type: string
+      description: |
+        Dynamic client registration endpoint URL (RFC 7591). Optional - will be discovered from server_url if not provided.
+    scopes:
+      type: array
+      items:
+        type: string
+      description: |
+        OAuth scopes requested. Optional - can be discovered from server_url if not provided.
+        Example: ["read", "write"]
+    resource:
+      type: string
+      description: |
+        Resource indicator (RFC 8707) sent on authorization and token requests.
+        Optional - identifies the protected MCP resource the token is intended
+        for, when the upstream provider supports resource indicators.
+
+OAuthFlowInitiation:
+  type: object
+  description: Response when initiating an OAuth flow
+  properties:
+    status:
+      type: string
+      enum: [pending_oauth]
+    message:
+      type: string
+    oauth_config_id:
+      type: string
+      description: ID of the OAuth config created for this flow
+    authorize_url:
+      type: string
+      description: URL to redirect the user to for authorization
+    expires_at:
+      type: string
+      format: date-time
+      description: When the OAuth authorization request expires
+    mcp_client_id:
+      type: string
+      description: The MCP client ID that initiated this OAuth flow
+    complete_url:
+      type: string
+      description: |
+        Relative URL to POST once the flow is authorized
+        (/api/mcp/client/{oauth_config_id}/complete-oauth). Note the path
+        parameter is the oauth_config_id, not the MCP client ID.
+    status_url:
+      type: string
+      description: |
+        Relative URL to poll for the flow status
+        (/api/oauth/config/{oauth_config_id}/status). Wait for
+        status "authorized" before calling complete_url.
+    next_steps:
+      type: array
+      items:
+        type: string
+      description: Human-readable steps to complete the flow (authorize, poll, complete)
+
+OAuthConfigStatus:
+  type: object
+  description: Status of an OAuth configuration
+  properties:
+    id:
+      type: string
+      description: OAuth config ID
+    status:
+      type: string
+      enum: [pending, authorized, failed]
+      description: |
+        Current status of the OAuth flow:
+        - pending: User has not yet authorized
+        - authorized: User authorized and token is stored
+        - failed: Authorization failed
+    created_at:
+      type: string
+      format: date-time
+      description: When this OAuth config was created
+    token_id:
+      type: string
+      description: ID of the associated OAuth token (only present if status is authorized)
+    token_expires_at:
+      type: string
+      format: date-time
+      description: When the OAuth access token expires (only present if status is authorized)
+    token_scopes:
+      type: array
+      items:
+        type: string
+      description: Scopes granted in the OAuth token (only present if status is authorized)
+
+OAuthToken:
+  type: object
+  description: OAuth access and refresh tokens
+  properties:
+    id:
+      type: string
+      description: Unique token identifier
+    access_token:
+      type: string
+      description: OAuth access token
+    refresh_token:
+      type: string
+      description: OAuth refresh token for obtaining new access tokens
+    token_type:
+      type: string
+      description: Token type (typically "Bearer")
+    expires_at:
+      type: string
+      format: date-time
+      description: When the access token expires
+    scopes:
+      type: array
+      items:
+        type: string
+      description: Scopes granted in this token
+    last_refreshed_at:
+      type: string
+      format: date-time
+      description: When the token was last refreshed
+
+
+# ─── MCP Per-User OAuth flow ────────────────────────────────────────────────
+
+MCPOauthFlowDetail:
+  type: object
+  description: |
+    Response for GET /api/oauth/per-user/flows/{id}. Mirrors the headers-side
+    `MCPHeadersFlowDetail` — identity binding for display plus the bits the
+    consent UI needs to decide its copy.
+  required:
+    - id
+    - flow_mode
+    - status
+    - mcp_client
+    - oauth_config_id
+    - expires_at
+    - created_at
+    - has_active_token
+  properties:
+    id:
+      type: string
+    flow_mode:
+      type: string
+      enum: [user, vk, session]
+    status:
+      type: string
+      enum: [pending, authorized, failed, expired]
+    mcp_client:
+      $ref: '../../schemas/management/mcp.yaml#/MCPClientSummary'
+    oauth_config_id:
+      type: string
+    user_id:
+      type: string
+      nullable: true
+    user:
+      $ref: '../../schemas/management/mcp.yaml#/MCPUserSummary'
+      nullable: true
+    virtual_key:
+      $ref: '../../schemas/management/mcp.yaml#/MCPVirtualKeySummary'
+      nullable: true
+    session_id:
+      type: string
+      nullable: true
+    expires_at:
+      type: string
+      format: date-time
+    created_at:
+      type: string
+      format: date-time
+    has_active_token:
+      type: boolean
+      description: |
+        True when an active token already exists for the flow's binding. A
+        pending flow with this set means OAuth was re-initiated unnecessarily;
+        the consent page can render this as "already authenticated" instead
+        of prompting again.

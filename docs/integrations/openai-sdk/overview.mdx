@@ -1,0 +1,401 @@
+---
+title: "Overview"
+description: "Use Bifrost as a drop-in replacement for OpenAI API with full compatibility and enhanced features."
+icon: "book"
+---
+
+## Overview
+
+Bifrost provides complete OpenAI API compatibility through protocol adaptation. The integration handles request transformation, response normalization, and error mapping between OpenAI's API specification and Bifrost's internal processing pipeline.
+
+This integration enables you to utilize Bifrost's features like governance, load balancing, semantic caching, multi-provider support, and more, all while preserving your existing OpenAI SDK-based architecture.
+
+**Endpoint:** `/openai`
+
+---
+
+## Setup
+
+<Tabs group="openai-sdk">
+<Tab title="Python">
+
+```python {5}
+import openai
+
+# Configure client to use Bifrost
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",
+    api_key="<YOUR-BIFROST-VIRTUAL-KEY>"  # Replace with your actual Bifrost virtual key.
+)
+
+# Make requests as usual
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+
+print(response.choices[0].message.content)
+```
+
+</Tab>
+<Tab title="JavaScript">
+
+```javascript {5}
+import OpenAI from "openai";
+
+// Configure client to use Bifrost
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/openai",
+  apiKey: "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+});
+
+// Make requests as usual
+const response = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "Hello!" }],
+});
+
+console.log(response.choices[0].message.content);
+```
+
+</Tab>
+</Tabs>
+
+---
+
+## Provider/Model Usage Examples
+
+Use multiple providers through the same OpenAI SDK format by prefixing model names with the provider:
+
+<Tabs group="openai-sdk">
+<Tab title="Python">
+
+```python
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",
+    api_key="<YOUR-BIFROST-VIRTUAL-KEY>"  # Replace with your actual Bifrost virtual key.
+)
+
+# OpenAI models (default)
+openai_response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello from OpenAI!"}]
+)
+
+# Anthropic models via OpenAI SDK format
+anthropic_response = client.chat.completions.create(
+    model="anthropic/claude-3-sonnet-20240229",
+    messages=[{"role": "user", "content": "Hello from Claude!"}]
+)
+
+# Google Vertex models via OpenAI SDK format
+vertex_response = client.chat.completions.create(
+    model="vertex/gemini-pro",
+    messages=[{"role": "user", "content": "Hello from Gemini!"}]
+)
+
+# Azure models
+azure_response = client.chat.completions.create(
+    model="azure/gpt-4o",
+    messages=[{"role": "user", "content": "Hello from Azure!"}]
+)
+
+# Local Ollama models
+ollama_response = client.chat.completions.create(
+    model="ollama/llama3.1:8b",
+    messages=[{"role": "user", "content": "Hello from Ollama!"}]
+)
+```
+
+</Tab>
+<Tab title="JavaScript">
+
+```javascript
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/openai",
+  apiKey: "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+});
+
+// OpenAI models (default)
+const openaiResponse = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "Hello from OpenAI!" }],
+});
+
+// Anthropic models via OpenAI SDK format
+const anthropicResponse = await openai.chat.completions.create({
+  model: "anthropic/claude-3-sonnet-20240229",
+  messages: [{ role: "user", content: "Hello from Claude!" }],
+});
+
+// Google Vertex models via OpenAI SDK format
+const vertexResponse = await openai.chat.completions.create({
+  model: "vertex/gemini-pro",
+  messages: [{ role: "user", content: "Hello from Gemini!" }],
+});
+
+// Azure models
+const azureResponse = await openai.chat.completions.create({
+  model: "azure/gpt-4o",
+  messages: [{ role: "user", content: "Hello from Azure!" }],
+});
+
+// Local Ollama models
+const ollamaResponse = await openai.chat.completions.create({
+  model: "ollama/llama3.1:8b",
+  messages: [{ role: "user", content: "Hello from Ollama!" }],
+});
+```
+
+</Tab>
+</Tabs>
+
+---
+
+## Adding Custom Headers
+
+Pass custom headers required by Bifrost plugins (like governance, telemetry, etc.):
+
+<Tabs group="openai-sdk">
+<Tab title="Python">
+
+```python
+import openai
+
+# Sending the virtual key through both fields requires dual_credential_conflict_behavior to be set to "prefer_vk".
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",
+    api_key="<YOUR-BIFROST-VIRTUAL-KEY>",  # Replace with your actual Bifrost virtual key.
+    default_headers={
+        "x-bf-vk": "<YOUR-BIFROST-VIRTUAL-KEY>",  # Replace with your actual Bifrost virtual key.
+    }
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello with custom headers!"}]
+)
+```
+
+</Tab>
+<Tab title="JavaScript">
+
+```javascript
+import OpenAI from "openai";
+
+// Sending the virtual key through both fields requires dual_credential_conflict_behavior to be set to "prefer_vk".
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/openai",
+  apiKey: "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+  defaultHeaders: {
+    "x-bf-vk": "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+  },
+});
+
+const response = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "Hello with custom headers!" }],
+});
+```
+
+</Tab>
+</Tabs>
+
+---
+
+## Async Inference
+
+Submit inference requests asynchronously and poll for results later using the `x-bf-async` header. This is useful for long-running requests where you don't want to hold a connection open. See [Async Inference](../../features/async-inference) for full details.
+
+<Note>
+Async inference requires a [Logs Store](../../features/observability/default) to be configured and is not compatible with streaming.
+</Note>
+
+### Chat Completions
+
+<Tabs group="openai-sdk">
+<Tab title="Python">
+
+```python
+import openai
+import time
+
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",
+    api_key="<YOUR-BIFROST-VIRTUAL-KEY>"  # Replace with your actual Bifrost virtual key.
+)
+
+# Submit async request
+initial = client.chat.completions.create(
+    model="openai/gpt-4o-mini",
+    messages=[{"role": "user", "content": "Tell me a short story."}],
+    extra_headers={"x-bf-async": "true"}
+)
+
+# If choices are present, the request completed synchronously
+if initial.choices:
+    print(initial.choices[0].message.content)
+else:
+    # Poll until completed
+    while True:
+        time.sleep(2)
+        poll = client.chat.completions.create(
+            model="openai/gpt-4o-mini",
+            messages=[{"role": "user", "content": "Tell me a short story."}],
+            extra_headers={"x-bf-async-id": initial.id}
+        )
+        if poll.choices:
+            print(poll.choices[0].message.content)
+            break
+```
+
+</Tab>
+<Tab title="JavaScript">
+
+```javascript
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/openai",
+  apiKey: "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+});
+
+// Submit async request
+const initial = await openai.chat.completions.create(
+  {
+    model: "openai/gpt-4o-mini",
+    messages: [{ role: "user", content: "Tell me a short story." }],
+  },
+  { headers: { "x-bf-async": "true" } }
+);
+
+// If choices are present, the request completed synchronously
+if (initial.choices?.length > 0) {
+  console.log(initial.choices[0].message.content);
+} else {
+  // Poll until completed
+  while (true) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const poll = await openai.chat.completions.create(
+      {
+        model: "openai/gpt-4o-mini",
+        messages: [{ role: "user", content: "Tell me a short story." }],
+      },
+      { headers: { "x-bf-async-id": initial.id } }
+    );
+    if (poll.choices?.length > 0) {
+      console.log(poll.choices[0].message.content);
+      break;
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+### Responses API
+
+<Tabs group="openai-sdk">
+<Tab title="Python">
+
+```python
+import openai
+import time
+
+client = openai.OpenAI(
+    base_url="http://localhost:8080/openai",
+    api_key="<YOUR-BIFROST-VIRTUAL-KEY>"  # Replace with your actual Bifrost virtual key.
+)
+
+# Submit async request
+initial = client.responses.create(
+    model="openai/gpt-4o-mini",
+    input="Tell me a short story.",
+    extra_headers={"x-bf-async": "true"}
+)
+
+# If status is "completed", the request completed synchronously
+if initial.status == "completed":
+    print(initial.output_text)
+else:
+    # Poll until completed
+    while True:
+        time.sleep(2)
+        poll = client.responses.create(
+            model="openai/gpt-4o-mini",
+            input="Tell me a short story.",
+            extra_headers={"x-bf-async-id": initial.id}
+        )
+        if poll.status == "completed":
+            print(poll.output_text)
+            break
+```
+
+</Tab>
+<Tab title="JavaScript">
+
+```javascript
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/openai",
+  apiKey: "<YOUR-BIFROST-VIRTUAL-KEY>", // Replace with your actual Bifrost virtual key.
+});
+
+// Submit async request
+const initial = await openai.responses.create(
+  { model: "openai/gpt-4o-mini", input: "Tell me a short story." },
+  { headers: { "x-bf-async": "true" } }
+);
+
+// If status is "completed", the request completed synchronously
+if (initial.status === "completed") {
+  console.log(initial.output_text);
+} else {
+  // Poll until completed
+  while (true) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const poll = await openai.responses.create(
+      { model: "openai/gpt-4o-mini", input: "Tell me a short story." },
+      { headers: { "x-bf-async-id": initial.id } }
+    );
+    if (poll.status === "completed") {
+      console.log(poll.output_text);
+      break;
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+### Async Headers
+
+| Header | Description |
+|---|---|
+| `x-bf-async: true` | Submit the request as an async job. Returns immediately with a job ID. |
+| `x-bf-async-id: <job-id>` | Poll for results of a previously submitted async job. |
+| `x-bf-async-job-result-ttl: <seconds>` | Override the default result TTL (default: 3600s). |
+
+---
+
+## Supported Features
+
+The OpenAI integration supports all features that are available in both the OpenAI SDK and Bifrost core functionality. If the OpenAI SDK supports a feature and Bifrost supports it, the integration will work seamlessly.
+
+---
+
+## Next Steps
+
+- **[Files and Batch API](./files-and-batch)** - File uploads and batch processing
+- **[Anthropic SDK](../anthropic-sdk/overview)** - Claude integration patterns
+- **[Google GenAI SDK](../genai-sdk)** - Gemini integration patterns
+- **[Configuration](../../quickstart/README)** - Bifrost setup and configuration
+- **[Core Features](../../features/)** - Advanced Bifrost capabilities
+

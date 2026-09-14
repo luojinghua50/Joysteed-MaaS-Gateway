@@ -1,0 +1,236 @@
+package schemas
+
+import (
+	"maps"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// RawRequestBodyTextRewriter synchronizes runtime literal replacements into provider-native JSON.
+// Integrations implement this contract because only they know which native fields correspond to
+// guardrail-visible normalized text. Callers must pass owned rawBody bytes and use only the returned
+// slice because implementations may mutate the input in place; any rewrite error is unsafe to forward.
+type RawRequestBodyTextRewriter func(rawBody []byte, replacements map[string]string) ([]byte, error)
+
+// TextTargetID identifies one integration-owned text field that mirrors normalized guardrail content.
+// It is opaque outside the integration/guardrail boundary so callers cannot infer native JSON paths
+// or replace a similarly-valued field by accident.
+type TextTargetID string
+
+// TextTargetIDForIndex returns the stable identifier for one guardrail-visible text row.
+// Native integrations and guardrail extraction use the same row order only within one request or response phase.
+func TextTargetIDForIndex(index int) TextTargetID {
+	return TextTargetID(strconv.Itoa(index))
+}
+
+// TextRewrite replaces one exact guardrail-visible text field after its original value is verified.
+// Unlike literal redaction maps, repeated originals may have distinct replacements because TargetID
+// identifies the field rather than its content.
+type TextRewrite struct {
+	TargetID    TextTargetID
+	Original    string
+	Replacement string
+}
+
+// RawRequestBodyTextTransformer synchronizes exact provider-managed transformations into provider-native JSON.
+// Integrations must verify TargetID ownership and Original before returning a body; a rewrite error is unsafe to
+// forward because raw passthrough would otherwise retain the untransformed value.
+type RawRequestBodyTextTransformer func(rawBody []byte, rewrites []TextRewrite) ([]byte, error)
+
+// RawResponseTextTransformer synchronizes exact provider-managed transformations into a native client response.
+// Integrations preserve the concrete raw response type and may rewrite only fields they own; errors must prevent
+// forwarding the original native response when its normalized counterpart has changed.
+type RawResponseTextTransformer func(rawResponse any, rewrites []TextRewrite) (any, error)
+
+// RawStreamTextEvent identifies guardrail-visible text carried by one provider-native stream event.
+type RawStreamTextEvent struct {
+	TargetID string
+	Text     string
+}
+
+// RawStreamTextCodec inspects and rewrites text in one provider-native raw stream event.
+// Integrations own this contract because only they know which raw event fields mirror
+// normalized assistant text; unrelated reasoning, tool, and lifecycle fields stay opaque.
+type RawStreamTextCodec interface {
+	// Inspect returns the event's text and opaque provider target identity when it is eligible.
+	Inspect(rawResponse string) (event RawStreamTextEvent, eligible bool, err error)
+	// Rewrite returns a copy of an eligible raw event with only its text field replaced.
+	Rewrite(rawResponse string, text string) (string, error)
+}
+
+// RedactionPhase identifies which request lifecycle phase produced a redaction finding.
+type RedactionPhase string
+
+const (
+	// RedactionPhaseInput marks redaction findings discovered while inspecting request-side content.
+	RedactionPhaseInput RedactionPhase = "input"
+	// RedactionPhaseOutput marks redaction findings discovered while inspecting response-side content.
+	RedactionPhaseOutput RedactionPhase = "output"
+)
+
+// RedactionData carries request-scoped redaction data from guardrails to log and trace sinks.
+type RedactionData struct {
+	LiteralReplacements RedactionMapsByPhase `json:"literal_replacements,omitempty"`
+	ReversibleMappings  RedactionMapsByPhase `json:"reversible_mappings,omitempty"`
+}
+
+// RedactionMapsByPhase stores replacement maps separately for request and response content.
+type RedactionMapsByPhase struct {
+	Input  map[string]string `json:"input,omitempty"`
+	Output map[string]string `json:"output,omitempty"`
+}
+
+// Clone returns an owned copy of the phase-scoped maps.
+func (m RedactionMapsByPhase) Clone() RedactionMapsByPhase {
+	return RedactionMapsByPhase{
+		Input:  maps.Clone(m.Input),
+		Output: maps.Clone(m.Output),
+	}
+}
+
+// HasReplacements reports whether either phase has replacement entries.
+func (m RedactionMapsByPhase) HasReplacements() bool {
+	return len(m.Input) > 0 || len(m.Output) > 0
+}
+
+// MergePhase merges replacements into one phase, copying entries so callers cannot mutate stored state.
+func (m *RedactionMapsByPhase) MergePhase(phase RedactionPhase, replacements map[string]string) {
+	if m == nil || len(replacements) == 0 {
+		return
+	}
+	switch phase {
+	case RedactionPhaseInput:
+		m.Input = mergeRedactionStringMaps(m.Input, replacements)
+	case RedactionPhaseOutput:
+		m.Output = mergeRedactionStringMaps(m.Output, replacements)
+	}
+}
+
+// MergedForMixedFields returns both phase maps for fields that can contain input and output.
+func (m RedactionMapsByPhase) MergedForMixedFields() map[string]string {
+	return mergeRedactionStringMaps(m.Input, m.Output)
+}
+
+// Clone returns an owned snapshot of the redaction data maps.
+//
+// Redaction data moves from request context into async log entries. A plain
+// struct copy would still share the underlying Go maps, so the log entry could
+// observe later request-context mutations. Cloning gives the log its own stable
+// data while keeping the copy shallow, which is enough because the maps only
+// contain immutable strings.
+func (d RedactionData) Clone() RedactionData {
+	return RedactionData{
+		LiteralReplacements: d.LiteralReplacements.Clone(),
+		ReversibleMappings:  d.ReversibleMappings.Clone(),
+	}
+}
+
+// HasReplacements reports whether any reversible or literal redaction data is present.
+func (d RedactionData) HasReplacements() bool {
+	return d.LiteralReplacements.HasReplacements() || d.ReversibleMappings.HasReplacements()
+}
+
+// RedactionDataFromContext returns the redaction data stored on ctx.
+func RedactionDataFromContext(ctx *BifrostContext) (RedactionData, bool) {
+	if ctx == nil {
+		return RedactionData{}, false
+	}
+	data, ok := ctx.Value(BifrostContextKeyRedactionData).(RedactionData)
+	if !ok || !data.HasReplacements() {
+		return RedactionData{}, false
+	}
+	return data, true
+}
+
+// SetRedactionDataOnContext stores non-empty redaction data on ctx.
+func SetRedactionDataOnContext(ctx *BifrostContext, data RedactionData) bool {
+	if ctx == nil || !data.HasReplacements() {
+		return false
+	}
+	ctx.SetValue(BifrostContextKeyRedactionData, data)
+	return true
+}
+
+// IsContentAttribute reports whether a span attribute may carry user or model content.
+func IsContentAttribute(key string) bool {
+	return traceContentAttributeScopeForKey(key) != traceContentAttributeScopeNone
+}
+
+// ApplyLiteralReplacements performs deterministic best-effort string redaction.
+func ApplyLiteralReplacements(text string, replacements map[string]string) string {
+	if text == "" || len(replacements) == 0 {
+		return text
+	}
+	keys := make([]string, 0, len(replacements))
+	for raw := range replacements {
+		if raw != "" {
+			keys = append(keys, raw)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if len(keys[i]) == len(keys[j]) {
+			return keys[i] < keys[j]
+		}
+		return len(keys[i]) > len(keys[j])
+	})
+	redacted := text
+	for _, raw := range keys {
+		redacted = strings.ReplaceAll(redacted, raw, replacements[raw])
+	}
+	return redacted
+}
+
+// RedactAttributeValue applies literal replacements to supported attribute value shapes.
+func RedactAttributeValue(value any, replacements map[string]string) any {
+	if len(replacements) == 0 {
+		return value
+	}
+	switch v := value.(type) {
+	case string:
+		return ApplyLiteralReplacements(v, replacements)
+	case []string:
+		redacted := make([]string, len(v))
+		for i, item := range v {
+			redacted[i] = ApplyLiteralReplacements(item, replacements)
+		}
+		return redacted
+	case []any:
+		redacted := make([]any, len(v))
+		for i, item := range v {
+			redacted[i] = RedactAttributeValue(item, replacements)
+		}
+		return redacted
+	case map[string]any:
+		redacted := make(map[string]any, len(v))
+		for key, item := range v {
+			redactedKey := ApplyLiteralReplacements(key, replacements)
+			redacted[redactedKey] = RedactAttributeValue(item, replacements)
+		}
+		return redacted
+	case map[string]string:
+		redacted := make(map[string]string, len(v))
+		for key, item := range v {
+			redactedKey := ApplyLiteralReplacements(key, replacements)
+			redacted[redactedKey] = ApplyLiteralReplacements(item, replacements)
+		}
+		return redacted
+	default:
+		return value
+	}
+}
+
+// mergeRedactionStringMaps returns a copied map containing both map values, with next taking precedence.
+func mergeRedactionStringMaps(current map[string]string, next map[string]string) map[string]string {
+	if len(current) == 0 && len(next) == 0 {
+		return nil
+	}
+	merged := maps.Clone(current)
+	if merged == nil {
+		merged = make(map[string]string, len(next))
+	}
+	for key, value := range next {
+		merged[key] = value
+	}
+	return merged
+}

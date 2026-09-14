@@ -1,0 +1,1561 @@
+---
+title: "Writing Go Plugins"
+description: "Step-by-step guide to creating native Go plugins for Bifrost using shared object (.so) files"
+icon: "golang"
+---
+
+## Overview
+
+This guide walks you through creating a native Go plugin for Bifrost using our [hello-world example](https://github.com/maximhq/bifrost/tree/main/examples/plugins/hello-world) as a reference. You'll learn how to structure your plugin, implement required functions, build the shared object, and integrate it with Bifrost.
+
+## Prerequisites
+
+Before you start, ensure you have:
+
+- **Go 1.27.0** installed (must match Bifrost's Go version)
+- **Linux or macOS** (Go plugins are not supported on Windows)
+- **Bifrost** installed and configured
+- Basic understanding of Go programming
+
+<Note>Make sure your go.mod has the go version pinned to 1.26.1</Note>
+
+## Project Structure
+
+A minimal plugin project should have the following structure:
+
+```
+hello-world/
+├── main.go          # Plugin implementation
+├── go.mod           # Go module definition
+├── go.sum           # Dependency checksums
+├── Makefile         # Build automation
+└── .gitignore       # Git ignore patterns
+```
+
+## Step 1: Initialize Your Plugin Project
+
+Create a new directory and initialize a Go module:
+
+```bash
+mkdir my-plugin
+cd my-plugin
+go mod init github.com/yourusername/my-plugin
+```
+
+Add Bifrost as a dependency:
+
+```bash
+go get github.com/maximhq/bifrost/core@latest
+```
+
+Your `go.mod` should look like this:
+
+```go
+module github.com/yourusername/my-plugin
+
+go 1.27.0
+
+require github.com/maximhq/bifrost/core v1.2.38
+```
+
+## Step 2: Implement the Plugin Interface
+
+Create `main.go` with the required plugin functions. Here's the complete hello-world example:
+
+<Tabs>
+  <Tab title="v1.5.x+">
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/maximhq/bifrost/core/schemas"
+)
+
+// Init is called when the plugin is loaded
+// config contains the plugin configuration from config.json
+func Init(config any) error {
+	fmt.Println("Init called")
+	// Initialize your plugin here (database connections, API clients, etc.)
+	return nil
+}
+
+// GetName returns the plugin's unique identifier
+func GetName() string {
+	return "Hello World Plugin"
+}
+
+// HTTPTransportPreHook intercepts requests BEFORE they enter Bifrost core
+// Modify req in-place. Return (*HTTPResponse, nil) to short-circuit.
+// Only called when using HTTP transport (bifrost-http)
+func HTTPTransportPreHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest) (*schemas.HTTPResponse, error) {
+	// Use ctx.Log for structured, scoped logging (recommended)
+	ctx.Log(schemas.LogLevelInfo, "HTTPTransportPreHook called")
+
+	// Read headers using case-insensitive helper (recommended)
+	contentType := req.CaseInsensitiveHeaderLookup("Content-Type")
+	fmt.Printf("Content-Type: %s\n", contentType)
+
+	// Modify request in-place
+	req.Headers["x-custom-header"] = "custom-value"
+
+	// Store values in context for use in other hooks
+	ctx.SetValue(schemas.BifrostContextKey("my-plugin-key"), "pre-hook-value")
+
+	// Return nil to continue, or return &schemas.HTTPResponse{} to short-circuit
+	return nil, nil
+}
+
+// HTTPTransportPostHook intercepts responses AFTER they exit Bifrost core
+// Modify resp in-place. Called in reverse order of pre-hooks.
+// Only called for NON-STREAMING responses when using HTTP transport (bifrost-http)
+func HTTPTransportPostHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, resp *schemas.HTTPResponse) error {
+	ctx.Log(schemas.LogLevelInfo, "HTTPTransportPostHook called")
+
+	// Modify response headers
+	resp.Headers["x-processed-by"] = "my-plugin"
+
+	// Read context values set in pre-hook
+	if val := ctx.Value(schemas.BifrostContextKey("my-plugin-key")); val != nil {
+		fmt.Printf("Context value: %v\n", val)
+	}
+
+	// Return nil to continue, or return error to short-circuit
+	return nil
+}
+
+// HTTPTransportStreamChunkHook intercepts streaming chunks BEFORE they're sent to the client
+// Modify chunk or return nil to skip. Called in reverse order of pre-hooks.
+// Only called for STREAMING responses when using HTTP transport (bifrost-http)
+func HTTPTransportStreamChunkHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, chunk *schemas.BifrostStreamChunk) (*schemas.BifrostStreamChunk, error) {
+	ctx.Log(schemas.LogLevelInfo, "HTTPTransportStreamChunkHook called")
+
+	// chunk is a typed struct containing one of:
+	// - BifrostTextCompletionResponse (text completion streaming)
+	// - BifrostChatResponse (chat completion streaming)
+	// - BifrostResponsesStreamResponse (responses API streaming)
+	// - BifrostSpeechStreamResponse (speech synthesis streaming)
+	// - BifrostTranscriptionStreamResponse (transcription streaming)
+	// - BifrostImageGenerationStreamResponse (image generation streaming)
+	// - BifrostError (error during streaming)
+
+	// Return chunk unchanged to pass through
+	return chunk, nil
+
+	// Or return nil to skip/filter this chunk:
+	// return nil, nil
+
+	// Or return modified chunk:
+	// modifiedChunk := &schemas.BifrostStreamChunk{BifrostChatResponse: ...}
+	// return modifiedChunk, nil
+}
+
+
+// PreRequestHook is called once per top-level request (NOT per fallback attempt).
+// This is the routing phase — use it for provider/model/fallback decisions.
+// Mutations to req.Provider/req.Model/req.Fallbacks commit and propagate to every attempt.
+// Errors are non-blocking (logged + skipped).
+func PreRequestHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) error {
+	ctx.Log(schemas.LogLevelInfo, "PreRequestHook called")
+	// Plugins that don't participate in routing should just return nil
+	return nil
+}
+
+// PreLLMHook is called before the request is sent to the provider
+// This is where you can modify requests or short-circuit the flow
+func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
+	ctx.Log(schemas.LogLevelInfo, "PreLLMHook called")
+	// Modify the request or return a short-circuit to skip provider call
+	return req, nil, nil
+}
+
+// PostLLMHook is called after receiving a response from the provider
+// This is where you can modify responses or handle errors
+func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	ctx.Log(schemas.LogLevelInfo, "PostLLMHook called")
+	// Modify the response or error before returning to caller
+	return resp, bifrostErr, nil
+}
+
+// Cleanup is called when Bifrost shuts down
+func Cleanup() error {
+	fmt.Println("Cleanup called")
+	// Clean up resources (close connections, flush buffers, etc.)
+	return nil
+}
+```
+
+<Note>
+This skeleton only shows the LLM and HTTP transport hooks. Plugins that need to intercept the **MCP gateway** (per-tool-call governance, transport-setup mutation) can also export `PreMCPHook` / `PostMCPHook` / `PreMCPConnectionHook` / `PostMCPConnectionHook` — see [MCP plugin hooks overview](#mcp-plugin-hooks-overview-sup-v1-5-x-sup) below.
+</Note>
+  </Tab>
+  <Tab title="v1.4.x">
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/maximhq/bifrost/core/schemas"
+)
+
+// Init is called when the plugin is loaded
+// config contains the plugin configuration from config.json
+func Init(config any) error {
+	fmt.Println("Init called")
+	// Initialize your plugin here (database connections, API clients, etc.)
+	return nil
+}
+
+// GetName returns the plugin's unique identifier
+func GetName() string {
+	return "Hello World Plugin"
+}
+
+// HTTPTransportPreHook intercepts requests BEFORE they enter Bifrost core
+// Modify req in-place. Return (*HTTPResponse, nil) to short-circuit.
+// Only called when using HTTP transport (bifrost-http)
+func HTTPTransportPreHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest) (*schemas.HTTPResponse, error) {
+	fmt.Println("HTTPTransportPreHook called")
+
+	// Read headers using case-insensitive helper (recommended)
+	contentType := req.CaseInsensitiveHeaderLookup("Content-Type")
+	fmt.Printf("Content-Type: %s\n", contentType)
+
+	// Modify request in-place
+	req.Headers["x-custom-header"] = "custom-value"
+
+	// Store values in context for use in other hooks
+	ctx.SetValue(schemas.BifrostContextKey("my-plugin-key"), "pre-hook-value")
+
+	// Return nil to continue, or return &schemas.HTTPResponse{} to short-circuit
+	return nil, nil
+}
+
+// HTTPTransportPostHook intercepts responses AFTER they exit Bifrost core
+// Modify resp in-place. Called in reverse order of pre-hooks.
+// Only called for NON-STREAMING responses when using HTTP transport (bifrost-http)
+func HTTPTransportPostHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, resp *schemas.HTTPResponse) error {
+	fmt.Println("HTTPTransportPostHook called")
+
+	// Modify response headers
+	resp.Headers["x-processed-by"] = "my-plugin"
+
+	// Read context values set in pre-hook
+	if val := ctx.Value(schemas.BifrostContextKey("my-plugin-key")); val != nil {
+		fmt.Printf("Context value: %v\n", val)
+	}
+
+	// Return nil to continue, or return error to short-circuit
+	return nil
+}
+
+// HTTPTransportStreamChunkHook intercepts streaming chunks BEFORE they're sent to the client
+// Modify chunk or return nil to skip. Called in reverse order of pre-hooks.
+// Only called for STREAMING responses when using HTTP transport (bifrost-http)
+func HTTPTransportStreamChunkHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, chunk *schemas.BifrostStreamChunk) (*schemas.BifrostStreamChunk, error) {
+	fmt.Println("HTTPTransportStreamChunkHook called")
+
+	// chunk is a typed struct containing one of:
+	// - BifrostTextCompletionResponse (text completion streaming)
+	// - BifrostChatResponse (chat completion streaming)
+	// - BifrostResponsesStreamResponse (responses API streaming)
+	// - BifrostSpeechStreamResponse (speech synthesis streaming)
+	// - BifrostTranscriptionStreamResponse (transcription streaming)
+	// - BifrostImageGenerationStreamResponse (image generation streaming)
+	// - BifrostError (error during streaming)
+
+	// Return chunk unchanged to pass through
+	return chunk, nil
+
+	// Or return nil to skip/filter this chunk:
+	// return nil, nil
+
+	// Or return modified chunk:
+	// modifiedChunk := &schemas.BifrostStreamChunk{BifrostChatResponse: ...}
+	// return modifiedChunk, nil
+}
+
+
+// PreRequestHook is called once per top-level request (routing phase)
+// Mutations to req.Provider/req.Model/req.Fallbacks commit across fallbacks
+func PreRequestHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) error {
+	fmt.Println("PreRequestHook called")
+	return nil
+}
+
+// PreLLMHook is called before the request is sent to the provider
+// This is where you can modify requests or short-circuit the flow
+func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
+	fmt.Println("PreLLMHook called")
+	// Modify the request or return a short-circuit to skip provider call
+	return req, nil, nil
+}
+
+// PostLLMHook is called after receiving a response from the provider
+// This is where you can modify responses or handle errors
+func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	fmt.Println("PostLLMHook called")
+	// Modify the response or error before returning to caller
+	return resp, bifrostErr, nil
+}
+
+// Cleanup is called when Bifrost shuts down
+func Cleanup() error {
+	fmt.Println("Cleanup called")
+	// Clean up resources (close connections, flush buffers, etc.)
+	return nil
+}
+```
+  </Tab>
+  <Tab title="v1.3.x">
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/maximhq/bifrost/core/schemas"
+)
+
+// Init is called when the plugin is loaded
+// config contains the plugin configuration from config.json
+func Init(config any) error {
+	fmt.Println("Init called")
+	// Initialize your plugin here (database connections, API clients, etc.)
+	return nil
+}
+
+// GetName returns the plugin's unique identifier
+func GetName() string {
+	return "Hello World Plugin"
+}
+
+// TransportInterceptor modifies raw HTTP headers and body
+// Only called when using HTTP transport (bifrost-http)
+func TransportInterceptor(ctx *schemas.BifrostContext, url string, headers map[string]string, body map[string]any) (map[string]string, map[string]any, error) {
+	fmt.Println("TransportInterceptor called")
+	// Modify headers or body before they enter Bifrost core
+	return headers, body, nil
+}
+
+// PreHook is called before the request is sent to the provider
+// This is where you can modify requests or short-circuit the flow
+func PreHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.PluginShortCircuit, error) {
+	fmt.Println("PreHook called")
+	// Modify the request or return a short-circuit to skip provider call
+	return req, nil, nil
+}
+
+// PostHook is called after receiving a response from the provider
+// This is where you can modify responses or handle errors
+func PostHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	fmt.Println("PostHook called")
+	// Modify the response or error before returning to caller
+	return resp, bifrostErr, nil
+}
+
+// Cleanup is called when Bifrost shuts down
+func Cleanup() error {
+	fmt.Println("Cleanup called")
+	// Clean up resources (close connections, flush buffers, etc.)
+	return nil
+}
+```
+  </Tab>
+</Tabs>
+
+### Understanding Each Function
+
+#### `Init(config any) error`
+
+Called once when the plugin is loaded. Use this to:
+- Parse plugin configuration
+- Initialize database connections
+- Set up API clients
+- Validate required environment variables
+
+```go
+func Init(config any) error {
+	// Parse configuration
+	cfg, ok := config.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("invalid config format")
+	}
+	
+	apiKey := cfg["api_key"].(string)
+	// Initialize your resources
+	return nil
+}
+```
+
+#### `GetName() string`
+
+Returns a unique identifier for your plugin. This name appears in logs and status reports.
+
+#### `ctx.Log(level, msg)` <sup>v1.5.x+</sup>
+
+Emits a structured log entry scoped to the current plugin. Use this instead of `fmt.Println` for production logging - entries are collected per-request and can be retrieved programmatically.
+
+```go
+ctx.Log(schemas.LogLevelInfo, "processing request")
+ctx.Log(schemas.LogLevelWarn, "cache miss, falling back to provider")
+ctx.Log(schemas.LogLevelError, "failed to parse response body")
+```
+
+**Available log levels:**
+
+| Constant | Value |
+|---|---|
+| `schemas.LogLevelDebug` | `"debug"` |
+| `schemas.LogLevelInfo` | `"info"` |
+| `schemas.LogLevelWarn` | `"warn"` |
+| `schemas.LogLevelError` | `"error"` |
+
+Key points:
+- **Thread-safe** - safe to call from concurrent goroutines
+- **Scoped** - each entry is automatically tagged with your plugin's name
+- **Timestamped** - entries include Unix millisecond timestamps
+- **No-op when unscoped** - safe to call in any context; silently ignored outside plugin hooks
+- Logs are retrievable via `ctx.GetPluginLogs()` (read copy) or `ctx.DrainPluginLogs()` (transfer ownership)
+
+#### `ctx.GetModelInfo(provider, model)` <sup>v1.6.7+</sup>
+
+Returns pricing and capability metadata for a model - the same information the `/v1/models` endpoint reports. Available from every hook, and from plugins built without a `framework` dependency.
+
+```go
+info := ctx.GetModelInfo(schemas.Anthropic, "claude-opus-5")
+if info == nil {
+	return // unknown model, or no catalog configured
+}
+
+if info.ContextLength != nil {
+	ctx.Log(schemas.LogLevelInfo, fmt.Sprintf("context window: %d tokens", *info.ContextLength))
+}
+if info.IsDeprecated {
+	ctx.Log(schemas.LogLevelWarn, "model is deprecated")
+}
+```
+
+**What comes back** - a `*schemas.Model`:
+
+| Field | Type | Description |
+|---|---|---|
+| `ID` | `string` | The model string you asked for |
+| `Pricing` | `*schemas.Pricing` | Flat per-token rates as decimal strings - `Prompt`, `Completion`, `Image`, `InputCacheRead`, `InputCacheWrite`, `WebSearch` |
+| `ContextLength` | `*int` | Total context window; falls back to max input tokens when the catalog has no separate value |
+| `MaxInputTokens` | `*int` | Input token ceiling |
+| `MaxOutputTokens` | `*int` | Output token ceiling |
+| `Architecture` | `*schemas.Architecture` | Modality, tokenizer, input/output modalities |
+| `SupportedParameters` | `[]string` | Request parameters the model accepts |
+| `IsDeprecated` | `bool` | Whether the model is retired |
+| `AdditionalAttributes` | `map[string]string` | Editorial metadata (description, tags) |
+
+Key points:
+- **Returns `nil`** when the model is unknown to the catalog, and also when no catalog is configured - always nil-check
+- **Fresh copy** - the returned `*schemas.Model` belongs to you; mutating it affects nothing else
+- **Provider is required** - pass the concrete provider that serves the model. Read it from `req.GetRequestFields()` in a pre-hook, or from the response's `RoutingInfo` in a post-hook, rather than inferring it from the model string
+- **Every field is optional** - the catalog is only as complete as the provider datasheet, so nil-check individual pointers too
+
+#### `ctx.CalculateCost(resp)` <sup>v1.6.7+</sup>
+
+Returns the dollar cost of a completed response.
+
+```go
+func (p *MyPlugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	cost := ctx.CalculateCost(resp) // compute synchronously
+	go func() {
+		p.reportToBilling(cost) // then use the value anywhere
+	}()
+	return resp, bifrostErr, nil
+}
+```
+
+Prefer this over doing arithmetic on `GetModelInfo(...).Pricing`. That field carries only flat prompt and completion rates, while `CalculateCost` applies the full pricing resolution:
+
+- Long-context tiers (128k / 200k / 272k)
+- Batch, priority, flex and fast rates
+- Cache read and cache write costs
+- The provider and request-mode fallback chain, so aliased and provider-prefixed models still resolve
+- Any virtual key, user, or provider key pricing override in effect for this request
+
+<Warning>
+Call `ctx.CalculateCost` **synchronously inside your hook**. It reads governance scopes (user ID, virtual key ID, selected key ID) off the request context, and that read is not safe once the request has been cancelled. If you need the cost in a background goroutine, compute it in the hook and close over the `float64` as shown above.
+</Warning>
+
+Returns `0` when no catalog is configured or the response carries no billable usage.
+
+<Note>
+Both methods are inert rather than fatal when no model catalog is wired - `GetModelInfo` returns `nil` and `CalculateCost` returns `0`. This keeps plugins portable between the Bifrost HTTP gateway, which always configures a catalog, and Go SDK embeddings of `core`, which may not.
+</Note>
+
+<Tabs>
+  <Tab title="v1.5.x+">
+#### `HTTPTransportPreAuthHook(ctx, req)` <sup>v2.0+</sup>
+
+**HTTP transport only.** Intercepts requests BEFORE the transport authenticates them, so anything this
+hook changes is what authentication sees. Implement it only when the plugin's job is to supply or
+translate a credential:
+- Derive a virtual key from an upstream identity header
+- Rewrite or normalise an `Authorization` header before it is validated
+- Reject a request outright with a custom response
+- Native .so plugins join the phase by exporting an `HTTPTransportPreAuthHook` symbol
+
+Key points:
+- Receives serializable `*HTTPRequest` (not raw fasthttp)
+- Carries the same request shape as `HTTPTransportPreHook` - headers, query, path params and body - and the same mutations apply, so a hook can move between the two phases by renaming
+- Modifying `req.Method` or `req.Path` fails the request with `409`
+- Return `(nil, nil)` to continue to authentication, request modifications applied
+- Return `(*HTTPResponse, nil)` to short-circuit with response
+- Return `(nil, error)` to short-circuit with error
+- No post-hook counterpart: `HTTPTransportPostHook` pairs with `HTTPTransportPreHook`, and a request rejected by authentication runs neither
+
+#### `HTTPTransportPreHook(ctx, req)`
+
+**HTTP transport only.** Intercepts requests BEFORE they enter Bifrost core and AFTER the transport has
+authenticated them, so the resolved caller identity is already on `ctx`. Use this to:
+- Modify request headers, body, or query params in-place
+- Short-circuit with a custom response
+- Store values in `BifrostContext` for use in other hooks
+- Works with both native .so and WASM plugins
+
+<Warning>
+**Changed in v2.0.** This hook used to run before authentication. A credential written here is now set
+too late to be authenticated against - move that work to `HTTPTransportPreAuthHook`. Nothing errors
+either way: where authentication rejects the request this hook never runs, and where it permits the
+request the hook runs and its header still reaches components downstream of it.
+</Warning>
+
+Key points:
+- Receives serializable `*HTTPRequest` (not raw fasthttp)
+- Modify `req.Headers`, `req.Body`, `req.Query` directly
+- Return `(nil, nil)` to continue to next plugin/handler
+- Return `(*HTTPResponse, nil)` to short-circuit with response
+- Return `(nil, error)` to short-circuit with error
+
+#### `HTTPTransportPostHook(ctx, req, resp)`
+
+**HTTP transport only.** Intercepts responses AFTER they exit Bifrost core. Use this to:
+- Modify response headers or body in-place
+- Log or monitor response data
+- Access context values set in pre-hook
+- Called in **reverse order** of pre-hooks
+
+Key points:
+- Receives both `*HTTPRequest` and `*HTTPResponse`
+- Modify `resp.Headers`, `resp.Body`, `resp.StatusCode` directly
+- Return `nil` to continue to next plugin/handler
+- Return `error` to short-circuit with error and skip remaining post-hooks
+- **NOT called for streaming responses** - use `HTTPTransportStreamChunkHook` instead
+
+#### `HTTPTransportStreamChunkHook(ctx, req, chunk)`
+
+**HTTP transport only.** Intercepts streaming response chunks BEFORE they're written to the client. Use this to:
+- Modify streaming chunks in real-time
+- Filter/skip specific chunks
+- Log or monitor streaming data
+- Called in **reverse order** of pre-hooks
+
+Key points:
+- Receives a `*schemas.BifrostStreamChunk` typed struct (not raw bytes)
+- The struct contains one non-nil field based on the response type (chat, text completion, responses, speech, transcription, image generation, or error)
+- Return `(chunk, nil)` to pass through unchanged
+- Return `(nil, nil)` to skip/filter the chunk entirely
+- Return `(modifiedChunk, nil)` to return a modified chunk
+- Return `(nil, error)` to send error to client and stop streaming
+
+<Warning>
+`HTTPTransportPostHook` is **NOT called** for streaming responses. Use `HTTPTransportStreamChunkHook` to intercept streaming data.
+</Warning>
+
+<Note>
+**Header and Query Parameter Lookups**: Use the case-insensitive helper methods for reading headers and query parameters:
+
+```go
+// ✅ Correct - use helper methods for case-insensitive lookup
+contentType := req.CaseInsensitiveHeaderLookup("Content-Type")
+apiKey := req.CaseInsensitiveQueryLookup("api_key")
+
+// Also works with any casing
+contentType := req.CaseInsensitiveHeaderLookup("content-type")
+contentType := req.CaseInsensitiveHeaderLookup("CONTENT-TYPE")
+
+// For setting headers, use direct map access
+req.Headers["X-Custom-Header"] = "value"
+```
+
+The helper methods (`CaseInsensitiveHeaderLookup` and `CaseInsensitiveQueryLookup`) ensure your plugin works correctly regardless of how the client sends header/query parameter names.
+</Note>
+
+<Warning>
+These functions are **only called** when using `bifrost-http`. They are **not invoked** when using Bifrost as a Go SDK.
+</Warning>
+  </Tab>
+  <Tab title="v1.4.x">
+#### `HTTPTransportPreHook(ctx, req)`
+
+**HTTP transport only.** Intercepts requests BEFORE they enter Bifrost core. Use this to:
+- Modify request headers, body, or query params in-place
+- Short-circuit with a custom response
+- Store values in `BifrostContext` for use in other hooks
+- Works with both native .so and WASM plugins
+
+Key points:
+- Receives serializable `*HTTPRequest` (not raw fasthttp)
+- Modify `req.Headers`, `req.Body`, `req.Query` directly
+- Return `(nil, nil)` to continue to next plugin/handler
+- Return `(*HTTPResponse, nil)` to short-circuit with response
+- Return `(nil, error)` to short-circuit with error
+
+#### `HTTPTransportPostHook(ctx, req, resp)`
+
+**HTTP transport only.** Intercepts responses AFTER they exit Bifrost core. Use this to:
+- Modify response headers or body in-place
+- Log or monitor response data
+- Access context values set in pre-hook
+- Called in **reverse order** of pre-hooks
+
+Key points:
+- Receives both `*HTTPRequest` and `*HTTPResponse`
+- Modify `resp.Headers`, `resp.Body`, `resp.StatusCode` directly
+- Return `nil` to continue to next plugin/handler
+- Return `error` to short-circuit with error and skip remaining post-hooks
+- **NOT called for streaming responses** - use `HTTPTransportStreamChunkHook` instead
+
+#### `HTTPTransportStreamChunkHook(ctx, req, chunk)`
+
+**HTTP transport only.** Intercepts streaming response chunks BEFORE they're written to the client. Use this to:
+- Modify streaming chunks in real-time
+- Filter/skip specific chunks
+- Log or monitor streaming data
+- Called in **reverse order** of pre-hooks
+
+Key points:
+- Receives a `*schemas.BifrostStreamChunk` typed struct (not raw bytes)
+- The struct contains one non-nil field based on the response type (chat, text completion, responses, speech, transcription, image generation, or error)
+- Return `(chunk, nil)` to pass through unchanged
+- Return `(nil, nil)` to skip/filter the chunk entirely
+- Return `(modifiedChunk, nil)` to return a modified chunk
+- Return `(nil, error)` to send error to client and stop streaming
+
+<Warning>
+`HTTPTransportPostHook` is **NOT called** for streaming responses. Use `HTTPTransportStreamChunkHook` to intercept streaming data.
+</Warning>
+
+<Warning>
+These functions are **only called** when using `bifrost-http`. They are **not invoked** when using Bifrost as a Go SDK.
+</Warning>
+  </Tab>
+  <Tab title="v1.3.x">
+#### `TransportInterceptor(...)`
+
+**HTTP transport only.** Called before requests enter Bifrost core. Use this to:
+- Add or modify HTTP headers
+- Transform request body
+- Implement authentication at the transport layer
+
+<Warning>
+This function is **only called** when using `bifrost-http`. It's **not invoked** when using Bifrost as a Go SDK.
+</Warning>
+  </Tab>
+</Tabs>
+
+#### `PreRequestHook(...)` <sup>v1.6.x+</sup>
+
+Called **once per top-level request**, before any provider call and before `PreLLMHook`. This is the **routing phase**: it's where plugins decide which provider, model, and fallbacks the request should be sent to.
+
+Use this for:
+- **Routing decisions**: governance rules, virtual-key load balancing, geo/tier routing
+- **Provider resolution**: filling in `req.Provider` for unprefixed model names (the built-in `model-catalog-resolver` does this as the last routing layer)
+- **Fallback chain construction**: populating `req.Fallbacks` based on policy
+
+**Why a separate hook from `PreLLMHook`:**
+
+| Aspect | `PreRequestHook` | `PreLLMHook` |
+|---|---|---|
+| Runs | Once per request | Once per provider attempt (re-runs on each fallback) |
+| Provider/Model mutations | **Commit and propagate** to every attempt | No-op for `Provider`/`Model` (overwritten by core) |
+| Use for | Routing decisions | Request transforms, caching, validation |
+| Short-circuit | No | Yes (can return a synthetic response) |
+| Error semantics | Non-blocking (logged, pipeline continues) | Non-blocking (logged, pipeline continues) |
+
+**Routing Example:**
+
+```go
+func PreRequestHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) error {
+	provider, model, _ := req.GetRequestFields()
+
+	// Route premium-tier requests to a faster provider
+	if tier := ctx.Value(schemas.BifrostContextKey("x-tier")); tier == "premium" && provider == "openai" {
+		req.SetProvider(schemas.Anthropic)
+		req.SetModel("claude-3-5-sonnet")
+		// Emit a routing-engine log entry so users can see why this decision was made
+		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
+			fmt.Sprintf("Routed %s to anthropic/claude-3-5-sonnet (tier=premium)", model))
+		schemas.AppendToContextList(ctx, schemas.BifrostContextKeyRoutingEnginesUsed,
+			schemas.RoutingEngineRoutingRule)
+	}
+	return nil
+}
+```
+
+**Two helpers worth knowing when writing routing logic:**
+
+- `ctx.AppendRoutingEngineLog(engine, level, message)` — emits a structured log entry visible in observability tools. Use it to explain *why* a routing decision was made.
+- `schemas.AppendToContextList(ctx, schemas.BifrostContextKeyRoutingEnginesUsed, engineName)` — records which routing engine(s) participated. Surfaces in telemetry as `routing.engines_used`.
+
+<Info>
+**Plugin order matters for routing.** Built-in routing plugins run in this order within `PreRequestHook`: governance routing rules → governance VK load balancing → enterprise load balancer → model-catalog-resolver (final fallback). Custom plugins can slot in via `placement` + `order` — see [Plugin Sequencing](./sequencing).
+</Info>
+
+<Info>
+**Errors are non-blocking.** Returning a non-nil error from `PreRequestHook` logs a warning but does NOT fail the request — the pipeline continues with the next plugin. The core validates `req.Provider` after all `PreRequestHook` plugins have run; an unresolved provider returns a 400 to the caller.
+</Info>
+
+#### `PreLLMHook(...)`
+
+Called before each provider request. Use this to:
+- Modify request parameters
+- Add logging or monitoring
+- Implement caching (check cache, return cached response)
+- Apply governance rules (rate limiting, budget checks)
+- **Short-circuit** to skip provider calls
+
+**Short-Circuiting Example:**
+
+```go
+func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
+	// Return cached response without calling provider
+	if cachedResponse := checkCache(req) {
+		return req, &schemas.LLMPluginShortCircuit{
+			Response: cachedResponse,
+		}, nil
+	}
+	return req, nil, nil
+}
+```
+
+#### `PostLLMHook(...)`
+
+Called after provider responses (or short-circuits). Use this to:
+- Transform responses
+- Log response data
+- Store responses in cache
+- Handle errors or implement fallback logic
+- Add custom metadata
+
+**Response Transformation Example:**
+
+```go
+func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	if resp != nil && resp.ChatResponse != nil {
+		// Add custom metadata
+		resp.ChatResponse.ExtraFields.RawResponse = map[string]interface{}{
+			"plugin_processed": true,
+			"timestamp": time.Now().Unix(),
+		}
+	}
+	return resp, bifrostErr, nil
+}
+```
+
+#### MCP plugin hooks overview <sup>v1.5.x+</sup>
+
+Plugins can also intercept traffic going through the **MCP gateway** (Bifrost's Model Context Protocol surface) by exporting any of four optional symbols. These are separate from the LLM hooks above — the LLM hooks fire for `/v1/chat/completions` / `/v1/responses` style traffic; the MCP hooks fire for ping / list_tools / execute_tool / connect operations on configured MCP clients.
+
+The MCP surface splits into two lifecycle stages with two hook pairs each:
+
+| Stage | Hook pair | Request type | Fires |
+|---|---|---|---|
+| **Connect** (transport setup) | `PreMCPConnectionHook` / `PostMCPConnectionHook` | `*BifrostMCPConnectRequest` | Once per MCP client when its transport is being established |
+| **Envelope** (per-call) | `PreMCPHook` / `PostMCPHook` | `*BifrostMCPRequest` | Per ping / list_tools / execute_tool call after Connect has succeeded |
+
+Connect carries transport-level inputs (URL, headers, stdio args) that don't apply post-connection, so it's handled separately by a typed interface. A plugin can implement both pairs, just the envelope pair, or just the Connect pair — export whichever symbols you need. The `.so` loader treats every MCP hook as optional.
+
+<Note>
+Connect short-circuits use `*MCPConnectionShortCircuit` (typed Connect response). Envelope short-circuits use `*MCPPluginShortCircuit` (generic envelope wrapper). They look similar but are not interchangeable — Connect doesn't go through the envelope path.
+</Note>
+
+#### `PreMCPConnectionHook(ctx, req)` <sup>v1.5.x+</sup>
+
+Runs when a configured MCP client's transport is being brought up. Use this to:
+- Inject transport-level headers (HTTP/SSE clients)
+- Mutate `StdioCommand` / `StdioArgs` for stdio transports
+- Refuse a connection (short-circuit with an error) based on client name / auth type
+
+Key points:
+- **Mutable fields** (changes are honored by Bifrost): `ConnectionString`, `Headers`, `StdioCommand`, `StdioArgs`
+- **Observe-only fields** (mutations are ignored): `ClientName`, `ConnectionType`, `AuthType` — changing them mid-flight would break the rest of the connect codepath
+- `Headers` mutations are silently dropped on `STDIO` and `InProcess` transports — check `req.ConnectionType` before injecting
+- Return `(req, nil, nil)` to continue with the (possibly mutated) request
+- Return `(req, &MCPConnectionShortCircuit{Error: ...}, nil)` to refuse the connection
+- Return `(req, &MCPConnectionShortCircuit{Response: ...}, nil)` to synthesize a successful handshake (rare — mostly for testing)
+
+```go
+func PreMCPConnectionHook(ctx *schemas.BifrostContext, req *schemas.BifrostMCPConnectRequest) (*schemas.BifrostMCPConnectRequest, *schemas.MCPConnectionShortCircuit, error) {
+    ctx.Log(schemas.LogLevelInfo, fmt.Sprintf("Connecting MCP client: %s (type=%s, auth=%s)", req.ClientName, req.ConnectionType, req.AuthType))
+
+    // Refuse blocklisted clients with a clear 403.
+    if isBlocked(req.ClientName) {
+        return req, &schemas.MCPConnectionShortCircuit{
+            Error: &schemas.BifrostError{
+                StatusCode: schemas.Ptr(403),
+                Error: &schemas.ErrorField{
+                    Message: fmt.Sprintf("client %q is not permitted", req.ClientName),
+                },
+            },
+        }, nil
+    }
+
+    // Inject an audit header — only meaningful for HTTP/SSE; stdio/inprocess ignore Headers.
+    if req.ConnectionType == schemas.MCPConnectionTypeHTTP || req.ConnectionType == schemas.MCPConnectionTypeSSE {
+        if req.Headers == nil {
+            req.Headers = make(map[string]string)
+        }
+        req.Headers["X-My-Audit"] = "bifrost-connect:" + req.ClientName
+    }
+
+    return req, nil, nil
+}
+```
+
+#### `PostMCPConnectionHook(ctx, resp, bifrostErr)` <sup>v1.5.x+</sup>
+
+Runs after the upstream initialize handshake. Use this to:
+- Read `ServerInfo`, `ProtocolVersion`, and `ServerCapabilities` from the negotiated handshake
+- Gate downstream behavior on advertised capabilities (e.g. warn if a server doesn't advertise `Tools`)
+- Transform handshake errors before they surface to the caller
+
+Key points:
+- On handshake failure, `resp` is `nil` and `bifrostErr` is populated
+- Mutating `resp` is allowed but rarely useful — the handshake result is already cached by the connect pipeline
+- Return the values unchanged to pass through; return a modified `bifrostErr` to transform errors
+
+```go
+func PostMCPConnectionHook(ctx *schemas.BifrostContext, resp *schemas.BifrostMCPConnectResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostMCPConnectResponse, *schemas.BifrostError, error) {
+    if bifrostErr != nil {
+        // bifrostErr.Error is a *ErrorField — can be nil for some failure
+        // shapes (e.g. network-level handshake errors). Guard before deref.
+        if bifrostErr.Error != nil {
+            ctx.Log(schemas.LogLevelError, fmt.Sprintf("MCP handshake failed: %s", bifrostErr.Error.Message))
+        }
+        return resp, bifrostErr, nil
+    }
+    if resp != nil && resp.ServerInfo != nil {
+        ctx.Log(schemas.LogLevelInfo, fmt.Sprintf("connected to %s v%s (protocol %s)", resp.ServerInfo.Name, resp.ServerInfo.Version, resp.ProtocolVersion))
+    }
+    if resp != nil && resp.ServerCapabilities != nil && !resp.ServerCapabilities.Tools {
+        ctx.Log(schemas.LogLevelWarn, fmt.Sprintf("server %q does not advertise Tools capability", resp.ExtraFields.ClientName))
+    }
+    return resp, bifrostErr, nil
+}
+```
+
+#### `PreMCPHook(ctx, req)` <sup>v1.5.x+</sup>
+
+Runs before each MCP envelope request (ping / list_tools / execute_tool). Use this to:
+- Apply per-tool allowlists or governance
+- Cache tool-list responses (short-circuit ListTools with a cached value)
+- Add request metadata to context for downstream PostMCPHook
+
+Key points:
+- The envelope is request-type-discriminated via `req.RequestType` — **always early-out for non-tool-execute envelopes** unless you specifically want to observe ping/list_tools. The `req.RequestType.IsExecuteTool()` helper exists for exactly this guard
+- For tool-execute requests, use `req.GetToolName()` to read the tool name regardless of which deprecated sub-request shape is populated (chat-tool-call vs responses-tool-call vs the future unified execute-tool)
+- Return `(req, &MCPPluginShortCircuit{Error: ...}, nil)` to block the call
+- Return `(req, &MCPPluginShortCircuit{Response: ...}, nil)` to short-circuit with a synthetic result
+
+```go
+func PreMCPHook(ctx *schemas.BifrostContext, req *schemas.BifrostMCPRequest) (*schemas.BifrostMCPRequest, *schemas.MCPPluginShortCircuit, error) {
+    // Only gate execute-tool envelopes; let ping/list_tools through.
+    if !req.RequestType.IsExecuteTool() {
+        return req, nil, nil
+    }
+
+    toolName := req.GetToolName()
+    if isBlocked(toolName) {
+        return req, &schemas.MCPPluginShortCircuit{
+            Error: &schemas.BifrostError{
+                StatusCode: schemas.Ptr(403),
+                Error: &schemas.ErrorField{
+                    Message: fmt.Sprintf("tool %q is not allowed", toolName),
+                },
+            },
+        }, nil
+    }
+    return req, nil, nil
+}
+```
+
+#### `PostMCPHook(ctx, resp, bifrostErr)` <sup>v1.5.x+</sup>
+
+Runs after each MCP envelope request completes (successfully or with error). Use this to:
+- Record tool-call latency or usage metrics
+- Transform error responses
+- Update audit trails set by `PreMCPHook` via context
+
+Key points:
+- Like Post LLM hook, runs in **reverse order** of pre-hooks across the plugin chain
+- The originating request type is available on the response via `resp.ExtraFields.MCPRequestType` (and on errors via `bifrostErr.ExtraFields.MCPRequestType`), so the same `IsExecuteTool()` early-out pattern works here too
+- Latency in milliseconds is on `resp.ExtraFields.Latency`
+
+```go
+func PostMCPHook(ctx *schemas.BifrostContext, resp *schemas.BifrostMCPResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostMCPResponse, *schemas.BifrostError, error) {
+    if resp != nil && resp.ExtraFields.MCPRequestType.IsExecuteTool() {
+        ctx.Log(schemas.LogLevelInfo, fmt.Sprintf("tool %s completed in %dms", resp.ExtraFields.ToolName, resp.ExtraFields.Latency))
+    }
+    return resp, bifrostErr, nil
+}
+```
+
+<Tip>
+The full working example covering all four MCP hooks (envelope + Connect) lives at [`examples/plugins/mcp-only`](https://github.com/maximhq/bifrost/tree/main/examples/plugins/mcp-only). Use it as a starting point rather than retyping the boilerplate.
+</Tip>
+
+#### Recipe: injecting dynamic headers server-side <sup>v1.5.x+</sup>
+
+[Header forwarding](../mcp/connecting-to-servers#forwarding-request-headers-to-mcp-servers) covers the case where the **caller** supplies per-request header values. Sometimes the value has to be computed server-side instead:
+
+- An **identity header the caller must not control**, like the authenticated user's email for per-user authorization upstream
+- A **dynamic value on a shared MCP connection**, like a short-lived service token or a per-request correlation ID, which the static `headers` field cannot express because it is fixed at configuration time
+
+In both cases, write the header into `BifrostContextKeyMCPExtraHeaders` from `PreMCPHook`. Bifrost re-reads that key on every outgoing wire call over the shared connection, so a single hook covers ping, list_tools, and execute_tool, and refreshed values take effect on the very next call with no reconnect. The example below stamps the signed-in user's email; anything you can compute in the hook (a token fetched from a secrets manager, a tenant ID resolved from the virtual key) is injected the same way.
+
+```go
+const (
+    userEmailHeader = "X-User-Email"
+    targetClient    = "acme_api"
+)
+
+// No IsExecuteTool() early-out here: the header should ride along on pings
+// and tool-list refreshes too, not just tool executions.
+func PreMCPHook(ctx *schemas.BifrostContext, req *schemas.BifrostMCPRequest) (*schemas.BifrostMCPRequest, *schemas.MCPPluginShortCircuit, error) {
+    // Scope the injection to the client meant to receive identity. The
+    // extra-headers map feeds every outgoing MCP call on this request, so
+    // without this guard any client whose allowed_extra_headers permits the
+    // header (including "*") would receive the user's email.
+    if req.ClientName != targetClient {
+        return req, nil, nil
+    }
+
+    // Populated by the auth middleware when the request carries a signed-in
+    // user; empty otherwise (e.g. an unauthenticated health check).
+    email, _ := ctx.Value(schemas.BifrostContextKeyUserEmail).(string)
+    if email == "" {
+        return req, nil, nil
+    }
+
+    // Merge rather than overwrite: the HTTP transport layer or an earlier
+    // plugin may already have populated this map with caller-forwarded headers.
+    merged := make(map[string][]string)
+    if existing, ok := ctx.Value(schemas.BifrostContextKeyMCPExtraHeaders).(map[string][]string); ok {
+        for k, v := range existing {
+            merged[k] = v
+        }
+    }
+    merged[userEmailHeader] = []string{email}
+    ctx.SetValue(schemas.BifrostContextKeyMCPExtraHeaders, merged)
+
+    return req, nil, nil
+}
+```
+
+<Note>
+`BifrostContextKeyUserEmail` is only populated on Enterprise deployments with [user provisioning (OIDC + SCIM)](../enterprise/user-provisioning) enabled; elsewhere it is always empty, making this exact plugin a no-op. Treat the email header as just one example of the pattern: any header can be injected this way. The inbound request headers are also available on the context under `BifrostContextKeyRequestHeaders` (a `map[string]string` with lowercased keys), so a value the caller sent can be transformed and re-injected too.
+</Note>
+
+Key points:
+- **The per-client allowlist still applies.** At execution time every header in `BifrostContextKeyMCPExtraHeaders` (plugin-injected or caller-forwarded) is checked against the MCP client's `allowed_extra_headers`. Add `X-User-Email` (or `"*"`) to each client that should receive it, otherwise the header is silently dropped on the wire. Note the allowlist is delivery gating, not privacy scoping: a client configured with `"*"` accepts every injected header, so restrict sensitive headers to their intended destination in the hook itself (the `req.ClientName` guard above).
+- **HTTP and SSE only.** STDIO and in-process transports carry no HTTP headers, so the injection is a no-op for them.
+- The Connect hooks are the wrong place for this: Connect runs once per shared transport, before any per-request identity exists, so there is no single caller to stamp. Per-request identity belongs in the envelope hooks.
+- The other MCP hook symbols don't need to be exported for this plugin to load; the loader treats each hook as optional.
+
+#### `Cleanup() error`
+
+Called on Bifrost shutdown. Use this to:
+- Close database connections
+- Flush buffers
+- Save state
+- Release resources
+
+## Step 3: Create a Makefile
+
+Create a `Makefile` to automate building your plugin:
+
+```makefile
+.PHONY: all build clean install help
+
+PLUGIN_NAME = my-plugin
+OUTPUT_DIR = build
+
+# Platform detection
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+	PLUGIN_EXT = .so
+	PLATFORM = linux
+endif
+ifeq ($(UNAME_S),Darwin)
+	PLUGIN_EXT = .so
+	PLATFORM = darwin
+endif
+
+# Architecture detection
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),x86_64)
+	ARCH = amd64
+endif
+ifeq ($(UNAME_M),arm64)
+	ARCH = arm64
+endif
+
+OUTPUT = $(OUTPUT_DIR)/$(PLUGIN_NAME)$(PLUGIN_EXT)
+
+build: ## Build the plugin for current platform
+	@echo "Building plugin for $(PLATFORM)/$(ARCH)..."
+	@mkdir -p $(OUTPUT_DIR)
+	go build -buildmode=plugin -o $(OUTPUT) main.go
+	@echo "Plugin built successfully: $(OUTPUT)"
+
+clean: ## Remove build artifacts
+	@rm -rf $(OUTPUT_DIR)
+
+install: build ## Build and install to Bifrost plugins directory
+	@mkdir -p ~/.bifrost/plugins
+	@cp $(OUTPUT) ~/.bifrost/plugins/
+	@echo "Plugin installed to ~/.bifrost/plugins/"
+```
+
+## Step 4: Build Your Plugin
+
+Build the plugin using the Makefile:
+
+```bash
+make build
+```
+
+This creates `build/my-plugin.so` in your project directory.
+
+For production, you may need to build for specific platforms:
+
+```bash
+# Build for Linux AMD64
+GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o my-plugin-linux-amd64.so main.go
+
+# Build for Linux ARM64
+GOOS=linux GOARCH=arm64 go build -buildmode=plugin -o my-plugin-linux-arm64.so main.go
+
+# Build for macOS ARM64 (M1/M2)
+GOOS=darwin GOARCH=arm64 go build -buildmode=plugin -o my-plugin-darwin-arm64.so main.go
+```
+
+<Warning>
+**Cross-compilation doesn't work for plugins!** You must build on the target platform. If you need a Linux plugin, build it on a Linux machine or use Docker.
+</Warning>
+
+## Step 5: Configure Bifrost to Load Your Plugin
+
+Add your plugin to Bifrost's `config.json`:
+
+```json
+{
+  "plugins": [
+    {
+      "enabled": true,
+      "name": "my-plugin",
+      "path": "/path/to/my-plugin.so",
+      "config": {
+        "api_key": "your-api-key",
+        "custom_setting": "value"
+      }
+    }
+  ]
+}
+```
+
+### Plugin Configuration Options
+
+- `enabled` - Set to `true` to load the plugin
+- `name` - Plugin identifier (used in logs)
+- `path` - Absolute or relative path to the `.so` file
+- `config` - Plugin-specific configuration passed to `Init()`
+
+## Step 6: Test Your Plugin
+
+Start Bifrost and verify your plugin loads:
+
+```bash
+./bifrost-http
+```
+
+You should see output like:
+
+```
+Init called
+[INFO] Plugin loaded: Hello World Plugin
+```
+
+Make a test request:
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+Check the logs for plugin hook calls:
+
+<Tabs>
+  <Tab title="v1.5.x+ (non-streaming)">
+```
+HTTPTransportPreHook called
+PreLLMHook called
+PostLLMHook called
+HTTPTransportPostHook called
+```
+  </Tab>
+  <Tab title="v1.5.x+ (streaming)">
+```
+HTTPTransportPreHook called
+PreLLMHook called
+PostLLMHook called
+HTTPTransportStreamChunkHook called (per chunk)
+```
+  </Tab>
+  <Tab title="v1.4.x (non-streaming)">
+```
+HTTPTransportPreHook called
+PreLLMHook called
+PostLLMHook called
+HTTPTransportPostHook called
+```
+  </Tab>
+  <Tab title="v1.4.x (streaming)">
+```
+HTTPTransportPreHook called
+PreLLMHook called
+PostLLMHook called
+HTTPTransportStreamChunkHook called (per chunk)
+```
+  </Tab>
+  <Tab title="v1.3.x">
+```
+TransportInterceptor called
+PreHook called
+PostHook called
+```
+  </Tab>
+</Tabs>
+
+## Advanced Plugin Patterns
+
+### Stateful Plugins
+
+For plugins that need to maintain state across requests:
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+	"github.com/maximhq/bifrost/core/schemas"
+)
+
+var (
+	requestCount int64
+	mu           sync.Mutex
+)
+
+func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
+	mu.Lock()
+	requestCount++
+	count := requestCount
+	mu.Unlock()
+	
+	ctx.Log(schemas.LogLevelInfo, fmt.Sprintf("request count: %d", count))
+	// Use count for rate limiting, metrics, etc.
+	return req, nil, nil
+}
+```
+
+### Error Handling with Fallbacks
+
+Control whether Bifrost should try fallback providers:
+
+```go
+func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	if bifrostErr != nil {
+		// Allow fallbacks for rate limit errors
+		if bifrostErr.Error.Type != nil && *bifrostErr.Error.Type == "rate_limit" {
+			ctx.Log(schemas.LogLevelWarn, "rate limit hit, allowing fallbacks")
+			allowFallbacks := true
+			bifrostErr.AllowFallbacks = &allowFallbacks
+		} else {
+			// Don't try fallbacks for auth errors
+			ctx.Log(schemas.LogLevelError, "auth error, blocking fallbacks")
+			allowFallbacks := false
+			bifrostErr.AllowFallbacks = &allowFallbacks
+		}
+	}
+	return resp, bifrostErr, nil
+}
+```
+
+### Caching Plugin Example
+
+```go
+var cache sync.Map
+
+func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
+	// Generate cache key from request
+	key := generateCacheKey(req)
+	
+	// Check cache
+	if cached, ok := cache.Load(key); ok {
+		ctx.Log(schemas.LogLevelDebug, "cache hit")
+		return req, &schemas.LLMPluginShortCircuit{
+			Response: cached.(*schemas.BifrostResponse),
+		}, nil
+	}
+	
+	ctx.Log(schemas.LogLevelDebug, "cache miss")
+	return req, nil, nil
+}
+
+func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	if resp != nil && bifrostErr == nil {
+		// Store in cache
+		key := generateCacheKeyFromResponse(resp)
+		cache.Store(key, resp)
+		ctx.Log(schemas.LogLevelDebug, "response cached")
+	}
+	return resp, bifrostErr, nil
+}
+```
+
+## Troubleshooting
+
+### Plugin Fails to Load
+
+**Error**: `plugin: not a plugin file`
+
+**Solution**: Ensure you built with `-buildmode=plugin`:
+```bash
+go build -buildmode=plugin -o plugin.so main.go
+```
+
+### Version Mismatch Errors
+
+**Error**: `plugin was built with a different version of package`
+
+**Why this happens**: Go's plugin system requires **exact version matching** for:
+- The Go compiler version
+- **All shared packages** (especially `github.com/maximhq/bifrost/core`)
+- **Transitive dependencies** (packages that your dependencies depend on)
+
+This is more strict than typical Go builds. Even if only one transitive dependency differs by a patch version, the plugin will fail to load.
+
+**Solution**: Ensure your plugin is built with the exact same versions as Bifrost.
+
+**Step 1: Diagnose the mismatch**
+
+Use `go version -m` to inspect the build info of both your plugin and the Bifrost binary:
+
+```bash
+# Check what versions your plugin was built with:
+$ go version -m my-plugin.so
+my-plugin.so: go1.27.0
+  dep  github.com/maximhq/bifrost/core  v1.3.50
+  dep  github.com/valyala/fasthttp      v1.51.0
+
+# Check what versions Bifrost was built with:
+$ go version -m bifrost-http
+bifrost-http: go1.27.0
+  dep  github.com/maximhq/bifrost/core  v1.3.54   # <-- MISMATCH!
+  dep  github.com/valyala/fasthttp      v1.55.0   # <-- MISMATCH!
+```
+
+Notice that even though the Go version matches (`go1.27.0`), the **package versions** are different - this causes the error.
+
+**Step 2: Update your plugin dependencies**
+
+```bash
+# Update to match Bifrost's core version
+go get github.com/maximhq/bifrost/core@v1.3.54
+go mod tidy
+
+# Rebuild the plugin
+go build -buildmode=plugin -o my-plugin.so main.go
+```
+
+**Step 3: Verify the fix**
+
+```bash
+# Confirm versions now match
+$ go version -m my-plugin.so | grep bifrost
+  dep  github.com/maximhq/bifrost/core  v1.3.54  # Now matches!
+```
+
+<Tip>
+**Pro tip**: Pin exact versions in your `go.mod` and keep your plugin's dependencies in sync with the Bifrost version you're deploying. Consider building both Bifrost and your plugins in the same CI pipeline to guarantee version alignment.
+</Tip>
+
+### Platform/Architecture Mismatch
+
+**Error**: `cannot load plugin built for GOOS=linux on darwin`
+
+**Solution**: Build on the target platform or use the correct GOOS/GOARCH for your system.
+
+### Function Not Found
+
+**Error**: `plugin: symbol Init not found`
+
+**Solution**: Ensure all required functions are exported (start with capital letter) and have the correct signature. The loader treats every hook as optional except `GetName` and `Cleanup` — including the MCP hook quartet (`PreMCPHook`, `PostMCPHook`, `PreMCPConnectionHook`, `PostMCPConnectionHook`). A typo in a hook name silently disables that hook rather than failing the load.
+
+## Source Code Reference
+
+The complete hello-world example is available in the Bifrost repository:
+
+- **Full Example**: [examples/plugins/hello-world](https://github.com/maximhq/bifrost/tree/main/examples/plugins/hello-world)
+- **main.go**: [Plugin implementation](https://github.com/maximhq/bifrost/blob/main/examples/plugins/hello-world/main.go)
+- **Makefile**: [Build configuration](https://github.com/maximhq/bifrost/blob/main/examples/plugins/hello-world/Makefile)
+- **go.mod**: [Dependencies](https://github.com/maximhq/bifrost/blob/main/examples/plugins/hello-world/go.mod)
+
+## Real-World Plugin Examples
+
+Explore production-ready plugins in the Bifrost repository:
+
+- **[Mocker Plugin](https://github.com/maximhq/bifrost/tree/main/plugins/mocker)** - Mock responses for testing
+- **[Logging Plugin](https://github.com/maximhq/bifrost/tree/main/plugins/logging)** - Advanced request/response logging
+- **[Semantic Cache Plugin](https://github.com/maximhq/bifrost/tree/main/plugins/semanticcache)** - Cache based on semantic similarity
+- **[Governance Plugin](https://github.com/maximhq/bifrost/tree/main/plugins/governance)** - Rate limiting and budget controls
+- **[JSON Parser Plugin](https://github.com/maximhq/bifrost/tree/main/plugins/jsonparser)** - Parse and validate JSON responses
+
+## Frequently Asked Questions
+
+### Do I need to rebuild my plugin when upgrading Bifrost?
+
+**Yes, absolutely.** Plugins must be compiled against the exact same version of `github.com/maximhq/bifrost/core` that Bifrost is using. This is a fundamental requirement of Go's plugin system.
+
+When you upgrade Bifrost, you must:
+1. Update your plugin's `go.mod` to use the matching core version
+2. Rebuild the plugin with the same Go version
+3. Redeploy the plugin alongside the new Bifrost version
+
+**Example:**
+
+If upgrading from Bifrost v1.2.17 to v1.3.0:
+
+```bash
+# Update your plugin dependency
+go get github.com/maximhq/bifrost/core@v1.3.0
+go mod tidy
+
+# Rebuild the plugin
+go build -buildmode=plugin -o my-plugin.so main.go
+```
+
+<Warning>
+**Version mismatch will cause runtime errors!** If your plugin is compiled with v1.2.17 but Bifrost is running v1.3.0, the plugin will fail to load with cryptic errors about package versions.
+</Warning>
+
+### Should plugin builds be part of my deployment pipeline?
+
+**Yes, strongly recommended.** Your plugin build and deployment should be tightly coupled with your Bifrost deployment.
+
+**Recommended CI/CD Workflow:**
+
+```yaml
+# Example GitHub Actions workflow
+name: Deploy Bifrost with Plugins
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Checkout code
+      - uses: actions/checkout@v3
+      
+      # 2. Setup Go
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.26.1'
+      
+      # 3. Build Bifrost
+      - name: Build Bifrost
+        run: |
+          cd transports/bifrost-http
+          go build -o bifrost-http
+      
+      # 4. Build ALL plugins with matching version
+      - name: Build Plugins
+        run: |
+          cd plugins/my-plugin
+          # Ensure plugin uses same core version as Bifrost
+          go get github.com/maximhq/bifrost/core@${{ env.BIFROST_VERSION }}
+          go mod tidy
+          go build -buildmode=plugin -o my-plugin.so main.go
+      
+      # 5. Bundle everything together
+      - name: Create deployment bundle
+        run: |
+          mkdir -p deploy/plugins
+          cp transports/bifrost-http/bifrost-http deploy/
+          cp plugins/my-plugin/my-plugin.so deploy/plugins/
+          cp config.json deploy/
+      
+      # 6. Deploy bundle to your infrastructure
+      - name: Deploy to Production
+        run: |
+          # Upload to S3, copy to servers, deploy to K8s, etc.
+          ./deploy.sh
+```
+
+**Key Principles:**
+
+1. **Version Lock** - Pin your plugin dependencies to specific Bifrost versions
+2. **Atomic Deployment** - Deploy Bifrost and plugins together as a single unit
+3. **Build Verification** - Test plugin loading as part of CI
+4. **Rollback Strategy** - Keep previous plugin versions for rollbacks
+
+### How do I handle plugin versioning in production?
+
+Organize your plugin deployments by version:
+
+```
+/opt/bifrost/
+├── v1.3.0/
+│   ├── bifrost-http
+│   └── plugins/
+│       ├── my-plugin.so
+│       └── cache-plugin.so
+├── v1.2.17/
+│   ├── bifrost-http
+│   └── plugins/
+│       ├── my-plugin.so
+│       └── cache-plugin.so
+└── current -> v1.3.0/  # Symlink to active version
+```
+
+This allows easy rollbacks:
+
+```bash
+# Rollback to previous version
+ln -sfn /opt/bifrost/v1.2.17 /opt/bifrost/current
+systemctl restart bifrost
+```
+
+### Can I use different plugin versions for different Bifrost instances?
+
+**No.** Each plugin must match the exact core version of the Bifrost instance loading it. If you're running multiple Bifrost versions (e.g., staging vs production), you need separate plugin builds for each version.
+
+```
+staging/
+  bifrost-http (v1.3.0)
+  plugins/
+    my-plugin-v1.3.0.so
+
+production/
+  bifrost-http (v1.2.17)
+  plugins/
+    my-plugin-v1.2.17.so
+```
+
+### What happens if I forget to rebuild a plugin?
+
+You'll see errors like:
+
+```
+plugin: symbol Init not found in plugin github.com/you/plugin
+plugin was built with a different version of package github.com/maximhq/bifrost/core
+```
+
+**Solution:** Rebuild the plugin with the correct core version. See the [Version Mismatch Errors](#version-mismatch-errors) troubleshooting section for detailed diagnosis steps using `go version -m`.
+
+### How do I test plugins before production deployment?
+
+**Multi-stage testing approach:**
+
+1. **Unit Tests** - Test plugin logic in isolation
+   ```go
+   func TestPreHook(t *testing.T) {
+       req := &schemas.BifrostRequest{...}
+       modifiedReq, shortCircuit, err := PreLLMHook(&ctx, req)
+       assert.NoError(t, err)
+       assert.Nil(t, shortCircuit)
+   }
+   ```
+
+2. **Integration Tests** - Load plugin in test Bifrost instance
+   ```bash
+   # Start test Bifrost with plugin
+   ./bifrost-http --config test-config.json
+   
+   # Run test requests
+   curl -X POST http://localhost:8080/v1/chat/completions ...
+   ```
+
+3. **Staging Environment** - Deploy to staging with production-like load
+
+4. **Canary Deployment** - Gradually roll out to production
+
+### Can I hot-reload plugins without restarting Bifrost?
+
+**Yes!** Bifrost supports hot-reloading plugins at runtime. You can update plugin configurations or reload plugin code without restarting the entire Bifrost instance.
+
+### How do I debug plugin loading issues?
+
+**Enable verbose logging:**
+
+```json
+{
+  "client": {
+    "enable_logging": true
+  },
+  "plugins": [
+    {
+      "enabled": true,
+      "name": "my-plugin",
+      "path": "./plugins/my-plugin.so",
+      "config": {}
+    }
+  ]
+}
+```
+
+For verbose plugin-loader logs, set `BIFROST_LOG_LEVEL=debug` in the environment.
+
+**Check plugin symbols:**
+
+```bash
+# List symbols exported by plugin
+go tool nm my-plugin.so | grep -E 'Init|GetName|PreLLMHook|PreMCPHook|PreMCPConnectionHook|PostMCPHook|PostMCPConnectionHook'
+```
+
+**Verify Go version:**
+
+```bash
+# Check Go version used to build plugin
+go version -m my-plugin.so
+```
+
+**Common debugging steps:**
+
+1. Verify file exists and has correct permissions
+2. Check Go version matches Bifrost
+3. Confirm core package version matches
+4. Ensure all required symbols are exported
+5. Review Bifrost logs for detailed error messages
+
+## Need Help?
+
+- **Discord Community**: [Join our Discord](https://discord.gg/exN5KAydbU)
+- **GitHub Issues**: [Report bugs or request features](https://github.com/maximhq/bifrost/issues)
+- **Documentation**: [Browse all docs](/)

@@ -1,0 +1,43 @@
+# Common schemas used across management APIs
+
+SuccessResponse:
+  type: object
+  description: Generic success response
+  properties:
+    status:
+      type: string
+      example: success
+    message:
+      type: string
+      example: Operation completed successfully
+
+ErrorResponse:
+  type: object
+  description: Error response
+  $ref: '../../schemas/inference/common.yaml#/BifrostError'
+
+MessageResponse:
+  type: object
+  description: Simple message response
+  properties:
+    message:
+      type: string
+
+EnvVar:
+  type: object
+  description: |
+    A secret-capable value. Serialized as an object with the resolved `value` plus
+    reference metadata; on input, a bare string is also accepted — plain text,
+    `env.VAR_NAME`, or `vault.path/to/secret` (references resolve at runtime and
+    only the reference is persisted).
+  properties:
+    value:
+      type: string
+      description: Resolved value (redacted in GET responses for secret fields)
+    ref:
+      type: string
+      description: Source reference (`env.VAR_NAME` or `vault.path`); empty for plain-text values
+    type:
+      type: string
+      enum: [plain_text, env, vault]
+      description: Source type of the value
